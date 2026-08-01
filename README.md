@@ -216,7 +216,15 @@ make lint       # compile every Vim9 module
 make test       # fake-server transport and editor integration
 make test-live  # end-to-end check against the installed Lean server
 make license-check # verify pinned third-party files and required notices
+make hooks      # run lint/license on commit and the full suite on push
 ```
+
+CI runs `make lint` and `make test` on Linux and macOS for every push and
+pull request (`.github/workflows/test.yml`). `make hooks` points
+`core.hooksPath` at `.githooks/` so the same lint, license, and headless
+test checks run locally before every commit and push (the suite takes a few
+seconds; skip with `--no-verify` when needed). `test-live` stays manual in
+both places since it needs a real Lean toolchain.
 
 The headless tests cover split JSON-RPC frames, initialization and graceful
 shutdown, request cancellation, failed-start backoff, diagnostics, progress

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Full headless suite before every commit — it runs in a few seconds.
+# (test-live is excluded: it needs a real Lean toolchain and is run manually.)
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+# Vim -es reads Ex commands from stdin if a test errors before qa!; give it
+# EOF so a broken test fails instead of hanging the hook.
+make lint test < /dev/null

@@ -1,0 +1,39 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # A test that errors mid-run can leave Vim hung in Ex mode; cap the job
+    # rather than letting a wedged suite run for hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Vim is installed
+        if: runner.os == 'Linux'
+        run: |
+          command -v vim || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends vim
+          }
+      - name: Show tool versions
+        run: |
+          vim --version | head -n 4
+          python3 --version
+      - name: Lint
+        run: make lint < /dev/null
+      - name: Test
+        run: make test < /dev/null

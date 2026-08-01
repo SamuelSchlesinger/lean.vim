@@ -1,4 +1,4 @@
-.PHONY: test test-live lint license-check
+.PHONY: test test-live lint license-check hooks
 
 test: license-check
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_abbreviations.vim
@@ -23,3 +23,6 @@ lint:
 
 license-check:
 	sh test/check_licenses.sh
+
+hooks:
+	git config core.hooksPath .githooks
