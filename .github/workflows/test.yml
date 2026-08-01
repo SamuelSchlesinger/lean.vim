@@ -21,14 +21,14 @@ jobs:
     # rather than letting a wedged suite run for hours.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Ensure Vim is installed
-        if: runner.os == 'Linux'
-        run: |
-          command -v vim || {
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends vim
-          }
+      - uses: actions/checkout@v5
+      # System/apt Vim on the runners predates uri_encode(); the plugin needs
+      # Vim 9.2 (see plugin/lean.vim). Pin the patch level the suite is
+      # documented against; the action caches the source build per OS.
+      - name: Install Vim 9.2
+        uses: rhysd/action-setup-vim@v1
+        with:
+          version: v9.2.0850
       - name: Show tool versions
         run: |
           vim --version | head -n 4
