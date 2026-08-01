@@ -36,7 +36,16 @@ if exists('g:loaded_switch')
   ]
 endif
 
+const undo_options = 'setlocal expandtab< shiftwidth< softtabstop< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'
+
+# plugin/lean.vim sets this flag when required builtins are missing; loading
+# the runtime modules would only add compile errors to its one clear message.
+if exists('g:lean_vim9_unsupported')
+  b:undo_ftplugin = undo_options
+  finish
+endif
+
 import autoload 'lean.vim' as lean
 lean.Attach(bufnr())
 
-b:undo_ftplugin = 'call lean#Detach(bufnr()) | setlocal expandtab< shiftwidth< softtabstop< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'
+b:undo_ftplugin = 'call lean#Detach(bufnr()) | ' .. undo_options

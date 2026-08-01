@@ -31,7 +31,9 @@ check_notice() {
 # Exact MIT-licensed copies from lean.nvim e05c0f8.
 check_hash data/lean/snippets.json 5b0d8cfee4f3d20e020e4fc7730f99abc5ad1c0f3f2f086dd0a91698e378b439
 check_hash snippets/lean.json 5b0d8cfee4f3d20e020e4fc7730f99abc5ad1c0f3f2f086dd0a91698e378b439
-check_hash syntax/lean.vim 7502c15a4e728c5c037fc2b9edd31ff4435828b20215a3c0f299a08745430879
+# MIT-licensed from lean.nvim e05c0f8, modified as described in NOTICE
+# (global markdown highlight overrides removed).
+check_hash syntax/lean.vim bf781c19cff402aa21f327758f561dcfa198562fb0b5da54a5d2fd3c952f42e3
 
 # Exact Apache-2.0 abbreviation data and the canonical license text.
 check_hash data/lean/abbreviations.json d5c529fdeb62071d6d16d51e3274a638165833a8c8cfdf02b379e051cbe22f27

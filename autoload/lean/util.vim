@@ -166,6 +166,46 @@ export def PathFromUri(uri: string): string
   return path
 enddef
 
+# 1-based [first, last] union of the line ranges every window showing the
+# buffer displays, widened by margin, or [] when the buffer is hidden.
+export def VisibleLineSpan(bufnr: number, margin: number): list<number>
+  var first = -1
+  var last = -1
+  for winid in win_findbuf(bufnr)
+    var info = getwininfo(winid)
+    if empty(info)
+      continue
+    endif
+    if first < 0 || info[0].topline < first
+      first = info[0].topline
+    endif
+    if info[0].botline > last
+      last = info[0].botline
+    endif
+  endfor
+  if first < 0
+    return []
+  endif
+  var line_count = len(getbufline(bufnr, 1, '$'))
+  return [max([1, first - margin]), min([line_count, last + margin])]
+enddef
+
+# bufnr({name}) treats its argument as a file pattern, so a path containing
+# pattern atoms like brackets can resolve to the wrong buffer. Compare
+# expanded buffer names exactly instead.
+export def FindBuffer(path: string): number
+  if empty(path)
+    return -1
+  endif
+  var absolute = fnamemodify(path, ':p')
+  for info in getbufinfo()
+    if !empty(info.name) && fnamemodify(info.name, ':p') ==# absolute
+      return info.bufnr
+    endif
+  endfor
+  return -1
+enddef
+
 export def Position(bufnr: number, lnum: number = 0, bytecol: number = -1): dict<number>
   var line_number = lnum > 0 ? lnum : line('.')
   var column = bytecol >= 0 ? bytecol : col('.') - 1
@@ -196,9 +236,6 @@ def EditOffset(lines: list<string>, position: dict<any>): number
   var line_index = max([0, position.line])
   var offset = 0
   for index in range(line_index)
-    if index == line_index
-      break
-    endif
     offset += strlen(lines[index]) + 1
   endfor
   return offset + ByteColumn(lines[line_index], position.character)
@@ -271,7 +308,7 @@ export def PrepareTextEdits(uri: string, edits: list<any>): dict<any>
   if empty(edits)
     return {ok: true, changed: false}
   endif
-  var bufnr = bufnr(path)
+  var bufnr = FindBuffer(path)
   if bufnr < 0
     bufnr = bufadd(path)
   endif

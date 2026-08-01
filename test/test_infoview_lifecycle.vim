@@ -16,6 +16,8 @@ lean#InfoviewOpen()
 var first = lean#InfoviewState()
 assert_equal(bufnr(root .. '/test/fixtures/Basic.lean'), first.source_bufnr)
 assert_true(!empty(win_findbuf(first.bufnr)), 'first infoview was not visible')
+assert_true(has_key(get(first, 'line_targets', {}), '1'),
+  'infoview render did not record the header jump target')
 
 # BufWinEnter does not fire when moving between two already-visible splits.
 # The tab-local infoview must still follow whichever Lean window is active.
@@ -79,6 +81,40 @@ catch
   navigation_error = v:exception
 endtry
 assert_equal('', navigation_error, 'infoview commands errored outside a Lean tab')
+
+# Regression: with the source window already closed, the infoview can be the
+# last window in the last tab. Closing it (interactively or from VimLeavePre
+# via CloseAll) must not raise E444; the window shows an empty buffer.
+silent! tabonly!
+sleep 20m
+execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+silent! only!
+lean#InfoviewOpen()
+var last_view = lean#InfoviewState()
+win_gotoid(bufwinid(last_view.source_bufnr))
+close
+assert_equal(1, winnr('$'), 'expected the infoview to be the last window')
+var close_error = ''
+try
+  lean#InfoviewClose()
+catch
+  close_error = v:exception
+endtry
+assert_equal('', close_error, 'closing a last-window infoview errored')
+assert_true(empty(win_findbuf(last_view.bufnr)),
+  'the infoview buffer was still displayed after a last-window close')
+
+# The same path through CloseAll (what VimLeavePre runs) must also be quiet.
+execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+lean#InfoviewOpen()
+win_gotoid(bufwinid(lean#InfoviewState().source_bufnr))
+close
+try
+  lean#InfoviewCloseAll()
+catch
+  close_error = v:exception
+endtry
+assert_equal('', close_error, 'CloseAll errored on a last-window infoview')
 
 lean#InfoviewCloseAll()
 if !empty(v:errors)

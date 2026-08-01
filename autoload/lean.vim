@@ -1,9 +1,13 @@
 vim9script
 
 import autoload 'lean/abbreviations.vim' as abbreviations
+import autoload 'lean/completion.vim' as completion
 import autoload 'lean/config.vim' as config
 import autoload 'lean/editor.vim' as editor
+import autoload 'lean/health.vim' as health
 import autoload 'lean/infoview.vim' as infoview
+import autoload 'lean/inlayhints.vim' as inlayhints
+import autoload 'lean/loogle.vim' as loogle
 import autoload 'lean/lsp.vim' as lsp
 import autoload 'lean/util.vim' as util
 
@@ -118,6 +122,9 @@ export def Attach(bufnr: number = bufnr())
   setbufvar(bufnr, 'lean_vim_attached', true)
   DefinePlugMappings()
   abbreviations.SetupBuffer(bufnr)
+  # After abbreviations: for a shared event the handlers run in registration
+  # order, and completion must observe the abbreviation state v:char edits.
+  completion.SetupBuffer(bufnr)
   lsp.Attach(bufnr)
 
   var group = $'lean_vim_buffer_{bufnr}'
@@ -126,6 +133,7 @@ export def Attach(bufnr: number = bufnr())
   execute $'autocmd TextChanged,TextChangedI <buffer={bufnr}> call lean#OnChanged({bufnr})'
   execute $'autocmd BufWritePost <buffer={bufnr}> call lean#OnSaved({bufnr})'
   execute $'autocmd CursorMoved,CursorMovedI <buffer={bufnr}> call lean#OnCursorMoved({bufnr})'
+  execute $'autocmd InsertLeave <buffer={bufnr}> call lean#OnInsertLeaveBuffer({bufnr})'
   execute $'autocmd BufFilePost <buffer={bufnr}> call lean#OnFileRenamed({bufnr})'
   execute $'autocmd BufUnload <buffer={bufnr}> call lean#OnUnload({bufnr})'
   augroup END
@@ -144,6 +152,9 @@ export def OnBufWinEnter(bufnr: number)
     return
   endif
   Attach(bufnr)
+  # Progress signs only decorate visible spans; a re-displayed buffer needs
+  # its cached decorations back.
+  lsp.RefreshProgress(bufnr)
   if infoview.HasView()
     infoview.Follow(bufnr, win_getid())
   endif
@@ -172,6 +183,19 @@ export def OnCursorMoved(bufnr: number)
   infoview.ScheduleUpdate(bufnr)
 enddef
 
+export def OnInsertLeaveBuffer(bufnr: number)
+  inlayhints.OnInsertLeave(bufnr)
+enddef
+
+export def OnWinScrolled()
+  inlayhints.OnWinScrolled()
+  lsp.OnWinScrolled()
+enddef
+
+export def InlayHintsToggle()
+  inlayhints.Toggle()
+enddef
+
 export def OnUnload(bufnr: number)
   lsp.Detach(bufnr)
 enddef
@@ -179,6 +203,7 @@ enddef
 export def Detach(bufnr: number = bufnr())
   lsp.Detach(bufnr)
   abbreviations.TeardownBuffer(bufnr)
+  completion.TeardownBuffer(bufnr)
   var group = $'lean_vim_buffer_{bufnr}'
   execute $'augroup {group}'
   autocmd!
@@ -221,6 +246,48 @@ enddef
 
 export def LineDiagnostics()
   infoview.ShowLineDiagnostics()
+enddef
+
+export def DiagnosticsList()
+  editor.DiagnosticsList()
+enddef
+
+export def Outline()
+  editor.Outline()
+enddef
+
+export def WorkspaceSymbols(query: string)
+  editor.WorkspaceSymbols(query)
+enddef
+
+export def Health()
+  health.Report()
+enddef
+
+export def Loogle(query: string)
+  loogle.Search(query)
+enddef
+
+# For 'statusline' via %{lean#StatuslineProgress()}: elaboration percent and
+# diagnostic counts for attached Lean buffers, an empty string elsewhere.
+export def StatuslineProgress(): string
+  var bufnr = bufnr()
+  if !getbufvar(bufnr, 'lean_lsp_attached', false)
+    return ''
+  endif
+  var parts: list<string> = []
+  var summary = lsp.ProgressSummary(bufnr)
+  if summary.processing
+    add(parts, $'⋯{summary.percent}%')
+  endif
+  var counts = lsp.DiagnosticCounts(bufnr)
+  if counts.error > 0
+    add(parts, $'E:{counts.error}')
+  endif
+  if counts.warning > 0
+    add(parts, $'W:{counts.warning}')
+  endif
+  return join(parts, ' ')
 enddef
 
 export def Hover()

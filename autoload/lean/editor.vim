@@ -65,7 +65,7 @@ def LocationItem(location: dict<any>): dict<any>
   endif
   var line_number = range.start.line + 1
   var line_text = ''
-  var target_bufnr = bufnr(path)
+  var target_bufnr = util.FindBuffer(path)
   if target_bufnr >= 0 && bufloaded(target_bufnr)
     var lines = getbufline(target_bufnr, line_number)
     line_text = empty(lines) ? '' : lines[0]
@@ -247,6 +247,180 @@ export def CodeAction(bufnr: number = bufnr())
     (result, error) => OnCodeActions(bufnr, changedtick, result, error))
 enddef
 
+const SYMBOL_KINDS = {
+  1: 'file', 2: 'module', 3: 'namespace', 4: 'package', 5: 'class',
+  6: 'method', 7: 'property', 8: 'field', 9: 'constructor', 10: 'enum',
+  11: 'interface', 12: 'function', 13: 'variable', 14: 'constant',
+  15: 'string', 16: 'number', 17: 'boolean', 18: 'array', 19: 'object',
+  # SymbolKind 24 is Event; the Lean server uses it for theorems.
+  20: 'key', 21: 'null', 22: 'enum member', 23: 'struct', 24: 'theorem',
+  25: 'operator', 26: 'type parameter',
+}
+
+def SymbolKindLabel(kind: any): string
+  return type(kind) == v:t_number ? get(SYMBOL_KINDS, kind, '') : ''
+enddef
+
+def FlattenDocumentSymbols(bufnr: number, symbols: list<any>, depth: number,
+    items: list<any>)
+  for symbol in symbols
+    if type(symbol) != v:t_dict
+      continue
+    endif
+    var name = get(symbol, 'name', '')
+    var range = get(symbol, 'selectionRange', get(symbol, 'range', {}))
+    if type(name) != v:t_string || type(range) != v:t_dict
+        || type(get(range, 'start', v:null)) != v:t_dict
+        || type(get(range.start, 'line', v:null)) != v:t_number
+        || range.start.line < 0
+      continue
+    endif
+    var lnum = range.start.line + 1
+    var col = 1
+    var character = get(range.start, 'character', v:null)
+    if type(character) == v:t_number && character >= 0
+      col = util.ByteColumn(get(getbufline(bufnr, lnum), 0, ''), character) + 1
+    endif
+    var kind = SymbolKindLabel(get(symbol, 'kind', 0))
+    add(items, {
+      bufnr: bufnr,
+      lnum: lnum,
+      col: col,
+      text: repeat('  ', depth) .. name .. (empty(kind) ? '' : $' [{kind}]'),
+    })
+    var children = get(symbol, 'children', [])
+    if type(children) == v:t_list
+      FlattenDocumentSymbols(bufnr, children, depth + 1, items)
+    endif
+  endfor
+enddef
+
+def OnDocumentSymbols(bufnr: number, result: any, error: any)
+  if type(error) == v:t_dict
+    util.Notify(ErrorMessage(error), 'ErrorMsg')
+    return
+  endif
+  var items: list<any> = []
+  if type(result) == v:t_list
+    var hierarchical = indexof(result, (_, symbol) =>
+      type(symbol) == v:t_dict && has_key(symbol, 'location')) < 0
+    if hierarchical
+      FlattenDocumentSymbols(bufnr, result, 0, items)
+    else
+      # SymbolInformation entries carry a full location instead of ranges.
+      for symbol in result
+        if type(symbol) != v:t_dict
+          continue
+        endif
+        var item = LocationItem(get(symbol, 'location', {}))
+        var name = get(symbol, 'name', '')
+        if empty(item) || type(name) != v:t_string
+          continue
+        endif
+        var kind = SymbolKindLabel(get(symbol, 'kind', 0))
+        item.text = name .. (empty(kind) ? '' : $' [{kind}]')
+        add(items, item)
+      endfor
+    endif
+  endif
+  setloclist(0, [], 'r', {title: 'Lean outline', items: items})
+  if empty(items)
+    util.Notify('no document symbols found')
+  else
+    lopen
+  endif
+enddef
+
+export def Outline(bufnr: number = bufnr())
+  lsp.Request(bufnr, 'textDocument/documentSymbol', {
+    textDocument: {uri: util.UriFromBuf(bufnr)},
+  }, (result, error) => OnDocumentSymbols(bufnr, result, error))
+enddef
+
+def OnWorkspaceSymbols(query: string, result: any, error: any)
+  if type(error) == v:t_dict
+    util.Notify(ErrorMessage(error), 'ErrorMsg')
+    return
+  endif
+  var items: list<any> = []
+  for symbol in type(result) == v:t_list ? result : []
+    if type(symbol) != v:t_dict
+      continue
+    endif
+    var name = get(symbol, 'name', '')
+    var item = LocationItem(get(symbol, 'location', {}))
+    if empty(item) || type(name) != v:t_string
+      continue
+    endif
+    var kind = SymbolKindLabel(get(symbol, 'kind', 0))
+    var container = get(symbol, 'containerName', '')
+    var suffix = type(container) == v:t_string && !empty(container)
+      ? $' ({container})'
+      : ''
+    item.text = name .. (empty(kind) ? '' : $' [{kind}]') .. suffix
+    add(items, item)
+  endfor
+  setqflist([], 'r', {title: $'Lean workspace symbols: {query}', items: items})
+  if empty(items)
+    util.Notify($'no workspace symbols match {string(query)}')
+  else
+    copen
+  endif
+enddef
+
+export def WorkspaceSymbols(query: string, bufnr: number = bufnr())
+  lsp.Request(bufnr, 'workspace/symbol', {query: query},
+    (result, error) => OnWorkspaceSymbols(query, result, error))
+enddef
+
+# All cached diagnostics for the buffer as a location list. Goal markers and
+# silent diagnostics are decoration-only and are excluded.
+export def DiagnosticsList(bufnr: number = bufnr())
+  var severity_types = {1: 'E', 2: 'W', 3: 'I', 4: 'H'}
+  var items: list<any> = []
+  for diagnostic in lsp.Diagnostics(util.UriFromBuf(bufnr))
+    if type(diagnostic) != v:t_dict
+        || get(diagnostic, 'isSilent', false)
+        || !empty(get(diagnostic, 'leanTags', []))
+      continue
+    endif
+    var message = get(diagnostic, 'message', '')
+    var range = get(diagnostic, 'range', {})
+    if type(message) != v:t_string || type(range) != v:t_dict
+        || type(get(range, 'start', v:null)) != v:t_dict
+        || type(get(range.start, 'line', v:null)) != v:t_number
+        || range.start.line < 0
+      continue
+    endif
+    var lnum = range.start.line + 1
+    var col = 1
+    var line_text = get(getbufline(bufnr, lnum), 0, '')
+    var character = get(range.start, 'character', v:null)
+    if type(character) == v:t_number && character >= 0
+      col = util.ByteColumn(line_text, character) + 1
+    endif
+    var severity = get(diagnostic, 'severity', 1)
+    add(items, {
+      bufnr: bufnr,
+      lnum: lnum,
+      col: col,
+      text: split(message, "\n", true)[0],
+      type: type(severity) == v:t_number
+        ? get(severity_types, severity, 'E')
+        : 'E',
+    })
+  endfor
+  sort(items, (left, right) => left.lnum == right.lnum
+    ? left.col - right.col
+    : left.lnum - right.lnum)
+  setloclist(0, [], 'r', {title: 'Lean diagnostics', items: items})
+  if empty(items)
+    util.Notify('no diagnostics in this buffer')
+  else
+    lopen
+  endif
+enddef
+
 def LeadingIndent(text: string, tabstop: number): number
   var width = 0
   for character in split(matchstr(text, '^\s*'), '\zs')
@@ -375,9 +549,14 @@ def OnHierarchyResult(direction: string, result: any, request_error: any)
       text: name .. DescribeImportKind(kind),
     })
   endfor
-  setqflist([], 'r', {title: $'Lean module {direction}', items: items})
+  var label = direction ==# 'imports'
+    ? 'Lean module imports'
+    : 'Lean modules importing this file'
+  setqflist([], 'r', {title: label, items: items})
   if empty(items)
-    util.Notify($'no module {direction} found')
+    util.Notify(direction ==# 'imports'
+      ? 'this module has no imports'
+      : 'no modules import this file')
   else
     copen
   endif
@@ -401,43 +580,79 @@ export def ModuleHierarchy(direction: string, bufnr: number = bufnr())
   }, (result, error) => OnHierarchy(bufnr, direction, result, error))
 enddef
 
-def RunInDirectory(command: list<string>, directory: string): dict<any>
-  var stdout: list<string> = []
-  var stderr: list<string> = []
-  var process: job
+def FinishCommand(state: dict<any>)
+  if state.done || !state.exited || !state.closed
+    return
+  endif
+  state.done = true
+  if state.timeout_timer >= 0
+    timer_stop(state.timeout_timer)
+    state.timeout_timer = -1
+  endif
+  call(state.on_done, [{status: state.status, stdout: state.stdout, stderr: state.stderr}])
+enddef
+
+def OnCommandClosed(state: dict<any>)
+  state.closed = true
+  FinishCommand(state)
+enddef
+
+def OnCommandExited(state: dict<any>, status: number)
+  state.exited = true
+  state.status = status
+  FinishCommand(state)
+enddef
+
+def KillCommand(state: dict<any>)
+  state.timeout_timer = -1
+  if !state.done && type(state.job) == v:t_job && job_status(state.job) ==# 'run'
+    job_stop(state.job)
+  endif
+enddef
+
+# Run argv in a directory and deliver {status, stdout, stderr} asynchronously.
+# A cold `lake env` can take many seconds; the caller must not block redraw.
+# Vim guarantees close_cb runs after the final out_cb/err_cb, so waiting for
+# both close and exit means stdout is complete when on_done fires.
+export def RunCommandAsync(command: list<string>, directory: string, OnDone: func(dict<any>))
+  var state: dict<any> = {
+    stdout: [],
+    stderr: [],
+    status: -1,
+    exited: false,
+    closed: false,
+    done: false,
+    timeout_timer: -1,
+    job: v:null,
+    on_done: OnDone,
+  }
   try
-    process = job_start(command, {
+    state.job = job_start(command, {
       cwd: directory,
       in_io: 'null',
       out_io: 'pipe',
       err_io: 'pipe',
       out_mode: 'nl',
       err_mode: 'nl',
-      out_cb: (_channel, message) => add(stdout, message),
-      err_cb: (_channel, message) => add(stderr, message),
+      out_cb: (_channel, message) => add(state.stdout, message),
+      err_cb: (_channel, message) => add(state.stderr, message),
+      close_cb: (_channel) => OnCommandClosed(state),
+      exit_cb: (_job, status) => OnCommandExited(state, status),
     })
   catch
-    return {status: -1, stdout: [], stderr: [v:exception]}
+    state.exited = true
+    state.closed = true
+    state.stderr = [v:exception]
+    FinishCommand(state)
+    return
   endtry
-  if job_status(process) ==# 'fail'
-    return {status: -1, stdout: [], stderr: []}
+  if job_status(state.job) ==# 'fail'
+    state.exited = true
+    state.closed = true
+    FinishCommand(state)
+    return
   endif
-  var started = reltime()
-  while job_status(process) ==# 'run' && reltimefloat(reltime(started)) < 10.0
-    sleep 5m
-  endwhile
-  if job_status(process) ==# 'run'
-    job_stop(process)
-    return {status: -1, stdout: stdout, stderr: stderr}
-  endif
-  # Allow final channel callbacks to drain after the exit callback marks the
-  # job dead.
-  sleep 1m
-  return {
-    status: get(job_info(process), 'exitval', -1),
-    stdout: stdout,
-    stderr: stderr,
-  }
+  state.timeout_timer = timer_start(10000, (_) => KillCommand(state))
 enddef
 
 def AbsoluteSearchPath(root: string, path: string): string
@@ -447,15 +662,11 @@ def AbsoluteSearchPath(root: string, path: string): string
   return fnamemodify(absolute, ':p')
 enddef
 
-export def SearchPaths(bufnr: number = bufnr()): list<string>
-  var status = lsp.Status(bufnr)
-  var root = get(status, 'root', getcwd())
+def ParseSearchPaths(root: string, prefix: dict<any>, environment: dict<any>): list<string>
   var paths: list<string> = []
-  var prefix = RunInDirectory(['lean', '--print-prefix'], root)
   if prefix.status == 0 && !empty(prefix.stdout)
     add(paths, fnamemodify(trim(prefix.stdout[0]) .. '/src/lean', ':p'))
   endif
-  var environment = RunInDirectory(['lake', 'env'], root)
   if environment.status == 0
     var source_path = ''
     for line in environment.stdout
@@ -472,8 +683,48 @@ export def SearchPaths(bufnr: number = bufnr()): list<string>
   return uniq(sort(paths))
 enddef
 
+def CollectSearchResult(state: dict<any>, key: string, result: dict<any>)
+  state.results[key] = result
+  if type(state.results.prefix) == v:t_dict
+      && type(state.results.environment) == v:t_dict
+    call(state.on_done,
+      [ParseSearchPaths(state.root, state.results.prefix, state.results.environment)])
+  endif
+enddef
+
+export def SearchPathsAsync(OnDone: func(list<string>), bufnr: number = bufnr())
+  var status = lsp.Status(bufnr)
+  var root = get(status, 'root', getcwd())
+  var state: dict<any> = {
+    root: root,
+    results: {prefix: v:null, environment: v:null},
+    on_done: OnDone,
+  }
+  RunCommandAsync(['lean', '--print-prefix'], root,
+    (result) => CollectSearchResult(state, 'prefix', result))
+  RunCommandAsync(['lake', 'env'], root,
+    (result) => CollectSearchResult(state, 'environment', result))
+enddef
+
+# Synchronous variant kept for scripts and tests. It waits on the async path
+# (callbacks run during sleep), so it can block up to the command timeouts.
+export def SearchPaths(bufnr: number = bufnr()): list<string>
+  var state: dict<any> = {paths: v:null}
+  SearchPathsAsync((paths: list<string>) => {
+    extend(state, {paths: paths})
+  }, bufnr)
+  var started = reltime()
+  while type(state.paths) != v:t_list && reltimefloat(reltime(started)) < 21.0
+    sleep 10m
+  endwhile
+  return type(state.paths) == v:t_list ? state.paths : []
+enddef
+
 export def ShowSearchPaths(bufnr: number = bufnr())
-  util.Popup('Lean search paths', SearchPaths(bufnr))
+  SearchPathsAsync((paths: list<string>) => {
+    util.Popup('Lean search paths',
+      empty(paths) ? ['No Lean search paths found.'] : paths)
+  }, bufnr)
 enddef
 
 defcompile

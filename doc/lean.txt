@@ -7,24 +7,32 @@ CONTENTS                                                     *lean-vim9*
   2. Installation.................................|lean-vim9-installation|
   3. Configuration...............................|lean-vim9-configuration|
   4. Commands...........................................|lean-vim9-commands|
-  5. Mappings...........................................|lean-vim9-mappings|
-  6. Compatibility................................|lean-vim9-compatibility|
-  7. Credits and licensing.............................|lean-vim9-credits|
+  5. Completion.......................................|lean-vim9-completion|
+  6. Statusline.......................................|lean-vim9-statusline|
+  7. Mappings...........................................|lean-vim9-mappings|
+  8. Compatibility................................|lean-vim9-compatibility|
+  9. Credits and licensing.............................|lean-vim9-credits|
 
 ===============================================================================
 1. Introduction                                      *lean-vim9-introduction*
 
 lean.vim is a Vim9-native Lean 4 environment modeled after lean.nvim.  It
-includes a Lean-specific LSP client, infoview, diagnostics, progress signs,
-semantic tokens, Unicode abbreviations, navigation, and code actions.
+includes a Lean-specific LSP client, infoview, completion, inlay hints,
+diagnostics, progress signs, semantic tokens, Unicode abbreviations,
+navigation, and code actions.
 
 ===============================================================================
 2. Installation                                        *lean-vim9-installation*
 
 Requirements:
 
-  - Vim 9.1 with +vim9script +job +channel +popupwin +textprop +signs
+  - Vim 9.2, or a late Vim 9.1 providing uri_encode(), built with
+    +vim9script +job +channel +popupwin +textprop +signs
+    (the plugin checks at startup and reports missing pieces clearly)
   - Lean 4 and, for Lake projects, lake on $PATH
+  - curl on $PATH only for the optional :LeanLoogle command
+
+Run |:LeanHealth| for a report on all of the above.
 
 Place the plugin on 'runtimepath' and enable runtime files: >
 
@@ -43,6 +51,21 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \   'leader': '\',
         \   'extra': {},
         \ },
+        \ 'completion': {
+        \   'enable': v:true,
+        \   'autotrigger': v:true,
+        \   'debounce': 100,
+        \   'min_length': 1,
+        \   'set_completeopt': v:true,
+        \   'resolve': v:true,
+        \   'timeout': 10000,
+        \ },
+        \ 'inlay_hints': {
+        \   'enable': v:true,
+        \   'debounce': 150,
+        \   'margin': 50,
+        \   'update_in_insert': v:false,
+        \ },
         \ 'infoview': {
         \   'autoopen': v:true,
         \   'orientation': 'auto',
@@ -51,7 +74,9 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \   'update_cooldown': 50,
         \   'show_processing': v:true,
         \   'show_no_info': v:false,
+        \   'no_goals_text': 'Goals accomplished 🎉',
         \ },
+        \ 'loogle': {'enable': v:false},
         \ 'lsp': {
         \   'enable': v:true,
         \   'command': [],
@@ -61,7 +86,7 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \   'stderr': v:true,
         \ },
         \ 'progress_bars': {'enable': v:true, 'character': '│'},
-        \ 'semantic_highlighting': {'enable': v:true},
+        \ 'semantic_highlighting': {'enable': v:true, 'links': {}},
         \ 'signs': {'enable': v:true},
         \ }
 <
@@ -74,6 +99,28 @@ throttling.  lsp.change_delay is the trailing debounce for an edit burst;
 the first isolated edit is synchronized immediately.  Set it to zero to
 synchronize every reported edit without debouncing.
 The abbreviations.leader value must contain exactly one character.
+inlay_hints.margin is the number of off-screen lines around the visible area
+that are also requested; hints follow scrolling automatically.
+infoview.no_goals_text is rendered when the goal list is empty; set it to
+'No goals.' for the plainer message.
+loogle.enable gates the only network feature; nothing is ever sent unless it
+is enabled and :LeanLoogle is invoked explicitly.
+
+Lean's server reports keyword, function, variable, and property semantic
+tokens.  Variables and property projections (like move.origin.col) cover
+most identifiers, so they are not rendered by default — coloring them
+drowns out the informative tokens.  semantic_highlighting.links maps a
+token type to a highlight group to override that, and an empty string
+disables a type.  For example, to tint bound variables subtly and disable
+function tokens: >
+
+  let g:lean_config = {'semantic_highlighting': {'links': {
+        \ 'variable': 'Comment',
+        \ 'function': '',
+        \ }}}
+<
+Each rendered type also has a LeanSemantic_{type} highlight group (for
+example LeanSemantic_function) for :highlight-based restyling.
 
 ===============================================================================
 4. Commands                                                *lean-vim9-commands*
@@ -83,6 +130,8 @@ Goals and diagnostics:~
   :LeanGoal                   Show the tactic goal at the cursor.
   :LeanTermGoal               Show the term-mode expected type.
   :LeanLineDiagnostics        Show diagnostics for the current line.
+  :LeanDiagnosticsList        Put every buffer diagnostic in the location
+                              list.
   :LeanHover                  Show LSP hover information.
 
 Infoview:~
@@ -98,6 +147,9 @@ Infoview:~
   :LeanInfoviewClearDiffPin   Remove the diff baseline.
   :LeanInfoviewToggleAutoDiffPin
                               Compare each goal with the previous goal.
+
+Inside the infoview, <CR> jumps the source window to the entry under the
+cursor: the position header, a pin, or a diagnostic.
 
 Server and editor:~
 
@@ -116,11 +168,49 @@ Server and editor:~
   :LeanModuleImports          List direct imports in quickfix.
   :LeanModuleImportedBy       List direct importers in quickfix.
   :LeanSearchPaths            Show Lean's project search paths.
+  :LeanOutline                Put the document symbols in the location list.
+  :LeanWorkspaceSymbols {q}   Search workspace symbols into quickfix.
+  :LeanInlayHintsToggle       Toggle inlay-hint rendering.
+  :LeanHealth                 Report toolchain, builtin, and server health.
+  :LeanLoogle {pattern}       Search loogle.lean-lang.org (needs
+                              loogle.enable and curl; see
+                              |lean-vim9-configuration|).
   :LeanAbbreviationsReverseLookup
                               Show abbreviations for the current symbol.
 
 ===============================================================================
-5. Mappings                                                *lean-vim9-mappings*
+5. Completion                                            *lean-vim9-completion*
+
+Lean buffers get an 'omnifunc' (CTRL-X CTRL-O) and, by default, as-you-type
+popup completion.  Typing an identifier character schedules a request after
+completion.debounce milliseconds; typing "." asks immediately.  Results
+arrive asynchronously — a slow elaborator never blocks typing — and the
+selected item's documentation is resolved lazily into the info popup.
+Theorems are marked with kind "t" in the menu.
+
+With completion.set_completeopt (the default) 'completeopt' is set
+buffer-locally to menuone,noinsert,noselect,popup, which the popup flow
+expects.  Set it to v:false to manage the option yourself.
+
+Set completion.autotrigger to v:false for manual-only completion.  When
+Vim's built-in 'autocomplete' option is enabled, lean.vim's own auto-popup
+stands down automatically.
+
+While a Unicode abbreviation (for example \alpha) is being typed, completion
+is suppressed entirely so the two features cannot fight over <Tab> or the
+popup menu.
+
+===============================================================================
+6. Statusline                                            *lean-vim9-statusline*
+
+lean#StatuslineProgress() returns a short summary for attached Lean buffers
+(elaboration percentage while processing, then E:/W: diagnostic counts) and
+an empty string elsewhere: >
+
+  set statusline+=%{lean#StatuslineProgress()}
+<
+===============================================================================
+7. Mappings                                                *lean-vim9-mappings*
 
 Suggested mappings are disabled by default.  Set g:lean_config.mappings to
 v:true to enable them.  Their RHS values are <Plug> mappings.
@@ -140,16 +230,16 @@ v:true to enable them.  Their RHS values are <Plug> mappings.
   K                    <Plug>(LeanHover)
 
 ===============================================================================
-6. Compatibility                                      *lean-vim9-compatibility*
+8. Compatibility                                      *lean-vim9-compatibility*
 
 The Vim9 infoview uses $/lean/plainGoal and $/lean/plainTermGoal.  It does not
 render ProofWidgets, clickable expression references, terminal images, SVGs,
 or nested widget tooltips.  Widget enable/disable commands remain defined and
-explain this limitation.  See FUNCTIONALITY.md in the repository for a full
-parity table.
+explain this limitation.  The repository README describes the full
+relationship to lean.nvim, and USAGE.md is a task-oriented guide.
 
 ===============================================================================
-7. Credits and licensing                                  *lean-vim9-credits*
+9. Credits and licensing                                  *lean-vim9-credits*
 
 This port exists thanks to Julian Berman and the lean.nvim community, whose
 work established the feature organization, interaction model, and many of the

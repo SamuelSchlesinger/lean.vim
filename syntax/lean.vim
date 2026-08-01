@@ -95,9 +95,6 @@ syn match leanNameLiteral '``' nextgroup=leanFrenchQuote
 " syn include     @markdown       syntax/markdown.vim
 syn region      leanBlockComment start="/-" end="-/" contains=@Spell,leanBlockComment
 syn match       leanComment     "--.*" contains=@Spell
-" fix up some highlighting links for markdown
-hi! link markdownCodeBlock Comment
-hi! link markdownError Comment
 
 if exists('b:current_syntax')
     unlet b:current_syntax

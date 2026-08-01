@@ -54,6 +54,19 @@ def response(request: dict[str, Any], result: Any) -> None:
     send({"jsonrpc": "2.0", "id": request["id"], "result": result})
 
 
+last_opened_uri = ""
+
+
+def message_uri_fallback(message: dict[str, Any]) -> str:
+    """workspace/symbol has no textDocument; reuse the last opened URI."""
+    params = message.get("params", {})
+    if isinstance(params, dict):
+        document = params.get("textDocument", {})
+        if isinstance(document, dict) and "uri" in document:
+            return document["uri"]
+    return last_opened_uri
+
+
 def handle_request(message: dict[str, Any]) -> None:
     method = message["method"]
     if method == "initialize":
@@ -67,13 +80,116 @@ def handle_request(message: dict[str, Any]) -> None:
                     "hoverProvider": True,
                     "definitionProvider": True,
                     "codeActionProvider": True,
+                    "completionProvider": {
+                        "triggerCharacters": ["."],
+                        "resolveProvider": True,
+                    },
+                    "inlayHintProvider": True,
+                    "documentSymbolProvider": True,
+                    "workspaceSymbolProvider": True,
                     "semanticTokensProvider": {
-                        "legend": {"tokenTypes": ["keyword"], "tokenModifiers": []},
+                        "legend": {
+                            "tokenTypes": ["keyword", "variable", "property"],
+                            "tokenModifiers": [],
+                        },
                         "full": True,
                     },
                 },
                 "serverInfo": {"name": "fake-lean", "version": "1"},
             },
+        )
+    elif method == "textDocument/completion":
+        position = message["params"]["position"]
+        line = position["line"]
+        if line == 3:
+            # Slow reply: lets the client supersede and cancel this request.
+            time.sleep(0.4)
+        if line == 1:
+            # The fixture line is `-- α😊abc`; the edit starts at the α
+            # (UTF-16 unit 3), before the client's local word start, and the
+            # replacement keeps the typed base as its prefix so Vim's popup
+            # filtering can display it.
+            response(
+                message,
+                {
+                    "isIncomplete": False,
+                    "items": [
+                        {
+                            "label": "abcγδ",
+                            "kind": 6,
+                            "textEdit": {
+                                "range": {
+                                    "start": {"line": 1, "character": 3},
+                                    "end": {
+                                        "line": 1,
+                                        "character": position["character"],
+                                    },
+                                },
+                                "newText": "abcγδ",
+                            },
+                        }
+                    ],
+                },
+            )
+        else:
+            response(
+                message,
+                {
+                    "isIncomplete": line == 5,
+                    "items": [
+                        {
+                            "label": "succ",
+                            "kind": 3,
+                            "detail": "Nat → Nat",
+                            "insertText": "succ",
+                            "sortText": "1",
+                            "data": {"marker": "succ"},
+                        },
+                        {
+                            "label": "theorem_item",
+                            "kind": 23,
+                            "insertText": "thm",
+                            "sortText": "2",
+                        },
+                    ],
+                },
+            )
+    elif method == "completionItem/resolve":
+        resolved = dict(message["params"])
+        resolved["documentation"] = {
+            "kind": "markdown",
+            "value": "resolved documentation",
+        }
+        response(message, resolved)
+    elif method == "textDocument/inlayHint":
+        # Fixture line 2 is `-- α😊abc`: character 6 sits after the emoji, so
+        # the byte column must be UTF-16 converted. The out-of-range hint and
+        # the surrogate-bisecting one (character 5) must both be dropped.
+        response(
+            message,
+            [
+                {
+                    "position": {"line": 0, "character": 7},
+                    "label": ": Nat",
+                    "kind": 1,
+                    "paddingLeft": True,
+                },
+                {
+                    "position": {"line": 1, "character": 6},
+                    "label": [{"value": "param"}, {"value": ":"}],
+                    "kind": 2,
+                },
+                {
+                    "position": {"line": 1, "character": 5},
+                    "label": "inside surrogate",
+                    "kind": 1,
+                },
+                {
+                    "position": {"line": 9999, "character": 0},
+                    "label": "out of range",
+                    "kind": 1,
+                },
+            ],
         )
     elif method == "$/lean/plainGoal":
         uri = message["params"]["textDocument"]["uri"]
@@ -104,7 +220,12 @@ def handle_request(message: dict[str, Any]) -> None:
     elif method == "textDocument/hover":
         response(message, {"contents": {"kind": "markdown", "value": "```lean\nNat\n```"}})
     elif method == "textDocument/semanticTokens/full":
-        response(message, {"data": [0, 0, 3, 0, 0]})
+        # keyword "def" (0-3), variable "answer" (4-10), property ":" (11);
+        # by default only the keyword may be rendered.
+        response(
+            message,
+            {"data": [0, 0, 3, 0, 0, 0, 4, 6, 1, 0, 0, 7, 1, 2, 0]},
+        )
     elif method in {"textDocument/definition", "textDocument/declaration"}:
         response(
             message,
@@ -138,6 +259,56 @@ def handle_request(message: dict[str, Any]) -> None:
             "command": "fake.resolvedAction",
         }
         response(message, resolved)
+    elif method == "textDocument/documentSymbol":
+        response(
+            message,
+            [
+                {
+                    "name": "answer",
+                    "kind": 14,
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 1, "character": 10},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 10},
+                    },
+                    "children": [
+                        {
+                            "name": "nested",
+                            "kind": 12,
+                            "range": {
+                                "start": {"line": 1, "character": 2},
+                                "end": {"line": 1, "character": 8},
+                            },
+                            "selectionRange": {
+                                "start": {"line": 1, "character": 2},
+                                "end": {"line": 1, "character": 8},
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+    elif method == "workspace/symbol":
+        response(
+            message,
+            [
+                {
+                    "name": "Nat.succ_le",
+                    "kind": 24,
+                    "containerName": "Nat",
+                    "location": {
+                        "uri": message_uri_fallback(message),
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 3},
+                        },
+                    },
+                }
+            ],
+        )
     elif method == "$/lean/prepareModuleHierarchy":
         response(
             message,
@@ -161,11 +332,35 @@ def handle_request(message: dict[str, Any]) -> None:
 
 
 def opened(message: dict[str, Any]) -> None:
+    global last_opened_uri
+    document = message["params"]["textDocument"]
+    last_opened_uri = document["uri"]
     if not emit_open_notifications:
         return
-    document = message["params"]["textDocument"]
     uri = document["uri"]
     version = document["version"]
+    if "Progress" in uri:
+        # Whole-file processing, like Lean's first fileProgress notification.
+        line_count = document.get("text", "").count("\n") + 1
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/lean/fileProgress",
+                "params": {
+                    "textDocument": {"uri": uri, "version": version},
+                    "processing": [
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": line_count - 1, "character": 0},
+                            },
+                            "kind": 1,
+                        }
+                    ],
+                },
+            }
+        )
+        return
     send(
         {
             "jsonrpc": "2.0",

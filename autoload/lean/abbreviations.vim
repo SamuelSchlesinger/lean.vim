@@ -130,10 +130,9 @@ def RestoreMappings(bufnr: number)
     return
   endif
   # :iunmap <buffer> and mapset() operate on the current buffer. BufLeave
-  # normally invokes us while that buffer is still current; retain the saved
-  # state as a fallback if another caller reaches us later.
+  # normally invokes us while that buffer is still current; the BufEnter
+  # autocmd retries restoration if another caller reaches us later.
   if bufnr != bufnr()
-    setbufvar(bufnr, 'lean_abbrev_restore_pending', true)
     return
   endif
 
@@ -147,7 +146,6 @@ def RestoreMappings(bufnr: number)
     endif
   endfor
   setbufvar(bufnr, 'lean_abbrev_saved_maps', {})
-  setbufvar(bufnr, 'lean_abbrev_restore_pending', false)
 enddef
 
 def InstallMappings(bufnr: number)

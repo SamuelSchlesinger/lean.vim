@@ -1,5 +1,4 @@
 *.swp
 *.swo
-test-rpc.log
-test-editor-rpc.log
-test-request-queue-rpc.log
+test-*-rpc.log
+test-progress-fixture-*.lean

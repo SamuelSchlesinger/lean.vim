@@ -20,11 +20,18 @@ assert_false(empty(maparg('K', 'n')), 'suggested Lean mapping was not installed'
 assert_true(exists($'#{main_group}#TextChanged'), 'Lean buffer autocmds were not installed')
 assert_true(exists($'#{abbreviation_group}#InsertCharPre'),
   'abbreviation autocmds were not installed')
+var completion_group = $'lean_completion_{source}'
+assert_equal('lean#completion#OmniFunc', &l:omnifunc, 'completion omnifunc was not installed')
+assert_true(exists($'#{completion_group}#InsertCharPre'),
+  'completion autocmds were not installed')
 
 # Vim's ftplugin loader executes b:undo_ftplugin before loading the new
 # filetype. Lean-owned state must not leak into the replacement filetype.
 setlocal filetype=text
 assert_false(get(b:, 'lean_vim_attached', true), 'Lean runtime survived a filetype change')
+assert_equal('', &l:omnifunc, 'completion omnifunc survived a filetype change')
+assert_false(exists($'#{completion_group}#InsertCharPre'),
+  'completion autocmds survived a filetype change')
 assert_true(empty(maparg('K', 'n')), 'suggested Lean mapping survived a filetype change')
 assert_true(empty(maparg('<Plug>(LeanHover)', 'n')), 'Lean <Plug> mapping survived a filetype change')
 assert_false(exists($'#{main_group}#TextChanged'), 'Lean buffer autocmds survived a filetype change')

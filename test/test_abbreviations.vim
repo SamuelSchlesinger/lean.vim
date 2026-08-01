@@ -156,7 +156,10 @@ NewLeanBuffer()
 Insert("i\\r\<CR>")
 assert_equal(['→', ''], getline(1, '$'))
 undo
-assert_equal(['', ''], getline(1, '$'), 'Return conversion required more than one undo')
+# Vim 9.1 kept the mapped <CR> newline in its own undo block; Vim 9.2 folds
+# the whole insert into one block. Both satisfy the single-undo guarantee.
+assert_true(getline(1, '$') ==# ['', ''] || getline(1, '$') ==# [''],
+  $'Return conversion required more than one undo: {string(getline(1, "$"))}')
 
 # Command-window support follows the Lean buffer that opened it.
 NewLeanBuffer('foo → bar')

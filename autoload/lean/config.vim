@@ -9,6 +9,21 @@ const DEFAULTS: dict<any> = {
     leader: "\\",
     extra: {},
   },
+  completion: {
+    enable: true,
+    autotrigger: true,
+    debounce: 100,
+    min_length: 1,
+    set_completeopt: true,
+    resolve: true,
+    timeout: 10000,
+  },
+  inlay_hints: {
+    enable: true,
+    debounce: 150,
+    margin: 50,
+    update_in_insert: false,
+  },
   infoview: {
     autoopen: true,
     orientation: 'auto',
@@ -17,6 +32,10 @@ const DEFAULTS: dict<any> = {
     update_cooldown: 50,
     show_processing: true,
     show_no_info: false,
+    no_goals_text: 'Goals accomplished 🎉',
+  },
+  loogle: {
+    enable: false,
   },
   lsp: {
     enable: true,
@@ -31,6 +50,7 @@ const DEFAULTS: dict<any> = {
   },
   semantic_highlighting: {
     enable: true,
+    links: {},
   },
   signs: {
     enable: true,

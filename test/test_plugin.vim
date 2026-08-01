@@ -133,6 +133,12 @@ assert_true(lean#lsp#ProgressAt(bufnr(), 2))
 assert_true(WaitFor(() => index(mapnew(prop_list(1, {bufnr: bufnr()}),
   (_, property) => property.type), 'LeanSemantic_keyword') >= 0),
   'semantic token property was not placed')
+# variable and property tokens are unstyled by default: their prop types are
+# never even created, so the server's variable/property tokens are skipped.
+assert_true(empty(prop_type_get('LeanSemantic_variable')),
+  'variable semantic tokens were rendered by default')
+assert_true(empty(prop_type_get('LeanSemantic_property')),
+  'property semantic tokens were rendered by default')
 
 assert_true(WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
   'auto-opened infoview goal did not render: ' .. string(lean#InfoviewState()))

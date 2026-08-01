@@ -14,7 +14,10 @@ byte-for-byte from that revision under lean.nvim's MIT license:
 
   data/lean/snippets.json
   snippets/lean.json
-  syntax/lean.vim
+
+syntax/lean.vim is copied from the same revision with one local change: the
+global markdown highlight overrides (hi! link markdownCodeBlock/markdownError)
+were removed because they restyled Markdown buffers outside Lean sessions.
 
 The following Vim9 files translate or adapt portions of lean.nvim's behavior
 or implementation and are also distributed under the MIT license:

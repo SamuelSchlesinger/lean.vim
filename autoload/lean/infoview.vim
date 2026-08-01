@@ -72,6 +72,15 @@ def InstallMappings()
   nnoremap <silent><buffer> q <Cmd>LeanInfoviewClose<CR>
   nnoremap <silent><buffer> <Esc> <Cmd>LeanGotoInfoview<CR>
   nnoremap <silent><buffer> <LocalLeader><Tab> <Cmd>LeanGotoInfoview<CR>
+  nnoremap <silent><buffer> <CR> <Cmd>call lean#infoview#JumpToTarget()<CR>
+enddef
+
+# :close on the last window of the last tab raises E444 — reachable both
+# interactively (source window closed first) and from VimLeavePre. Show an
+# empty buffer there instead.
+def CloseInfoWindow(winid: number)
+  win_execute(winid,
+    'if winnr("$") == 1 && tabpagenr("$") == 1 | enew | else | close | endif')
 enddef
 
 def CreateWindow(view: dict<any>)
@@ -127,7 +136,8 @@ def GoalLines(result: any): list<string>
   var goals = get(result, 'goals', v:null)
   if type(goals) == v:t_list
     if empty(goals)
-      return ['No goals.']
+      var accomplished = config.Get().infoview.no_goals_text
+      return [empty(accomplished) ? 'No goals.' : accomplished]
     endif
     var lines: list<string> = []
     if len(goals) > 1
@@ -149,8 +159,10 @@ def GoalLines(result: any): list<string>
     : []
 enddef
 
-def DiagnosticLines(diagnostics: list<any>): list<string>
-  var lines: list<string> = []
+# One rendered block per diagnostic: header line, indented body, and the
+# source position <CR> should jump to.
+def DiagnosticBlocks(diagnostics: list<any>): list<dict<any>>
+  var blocks: list<dict<any>> = []
   var labels = {1: 'error', 2: 'warning', 3: 'information', 4: 'hint'}
   for diagnostic in diagnostics
     if type(diagnostic) != v:t_dict
@@ -164,9 +176,29 @@ def DiagnosticLines(diagnostics: list<any>): list<string>
     if type(message) != v:t_string
       continue
     endif
-    add(lines, $'▼ {label}:')
-    extend(lines, mapnew(split(message, "\n", true),
-      (_, line) => '  ' .. line))
+    var target: dict<any> = {}
+    var range = get(diagnostic, 'range', {})
+    if type(range) == v:t_dict
+        && type(get(range, 'start', v:null)) == v:t_dict
+        && type(get(range.start, 'line', v:null)) == v:t_number
+        && type(get(range.start, 'character', v:null)) == v:t_number
+        && range.start.line >= 0 && range.start.character >= 0
+      target = {line: range.start.line, character: range.start.character}
+    endif
+    add(blocks, {
+      header: $'▼ {label}:',
+      body: mapnew(split(message, "\n", true), (_, line) => '  ' .. line),
+      target: target,
+    })
+  endfor
+  return blocks
+enddef
+
+def DiagnosticLines(diagnostics: list<any>): list<string>
+  var lines: list<string> = []
+  for block in DiagnosticBlocks(diagnostics)
+    add(lines, block.header)
+    extend(lines, block.body)
   endfor
   return lines
 enddef
@@ -195,17 +227,21 @@ enddef
 
 def Render(view: dict<any>)
   var lines: list<string> = []
+  var targets: dict<any> = {}
   if !bufloaded(view.source_bufnr)
+    view.line_targets = {}
     SetLines(view, ['The Lean source buffer is no longer loaded.'])
     return
   endif
 
   add(lines, fnamemodify(bufname(view.source_bufnr), ':t') ..
     $'  {view.position.line + 1}:{view.position.character + 1}')
+  targets[len(lines)] = {line: view.position.line, character: view.position.character}
   add(lines, repeat('─', 32))
 
   for pin in view.pins
     add(lines, $'Pin {pin.line + 1}:{pin.character + 1}')
+    targets[len(lines)] = {line: pin.line, character: pin.character}
     extend(lines, pin.lines)
     add(lines, '')
   endfor
@@ -237,8 +273,15 @@ def Render(view: dict<any>)
     if !empty(lines) && !empty(lines[-1])
       add(lines, '')
     endif
-    extend(lines, DiagnosticLines(view.diagnostics))
+    for block in DiagnosticBlocks(view.diagnostics)
+      add(lines, block.header)
+      if !empty(block.target)
+        targets[len(lines)] = block.target
+      endif
+      extend(lines, block.body)
+    endfor
   endif
+  view.line_targets = targets
   SetLines(view, lines)
 enddef
 
@@ -307,6 +350,7 @@ export def Open(bufnr: number = bufnr())
       pins: [],
       pin_generation: 0,
       pin_requests: [],
+      line_targets: {},
       diff_pin: [],
       auto_diff: false,
       paused: false,
@@ -358,7 +402,7 @@ export def Close()
     CancelPinRequests(view)
   endif
   if IsVisible(view)
-    win_execute(bufwinid(view.bufnr), 'close')
+    CloseInfoWindow(bufwinid(view.bufnr))
   endif
 enddef
 
@@ -377,7 +421,7 @@ export def CloseAll()
       continue
     endif
     for winid in win_findbuf(view.bufnr)
-      win_execute(winid, 'close')
+      CloseInfoWindow(winid)
     endfor
   endfor
 enddef
@@ -390,6 +434,57 @@ export def Toggle(bufnr: number = bufnr())
   endif
 enddef
 
+# Focus the window showing the view's source buffer in this tab, repairing a
+# stale stored window id first. Notifies and returns false when none exists.
+def GoToSource(view: dict<any>): bool
+  var source_winid = view.source_winid
+  if win_id2win(source_winid) == 0
+      || winbufnr(win_id2win(source_winid)) != view.source_bufnr
+    source_winid = -1
+    for candidate in win_findbuf(view.source_bufnr)
+      if win_id2tabwin(candidate)[0] == tabpagenr()
+        source_winid = candidate
+        break
+      endif
+    endfor
+  endif
+  if source_winid > 0
+    view.source_winid = source_winid
+    win_gotoid(source_winid)
+    return true
+  endif
+  util.Notify('the infoview source window is no longer open')
+  return false
+enddef
+
+# <CR> in the infoview: jump the source window to the entry under or above
+# the cursor (the header, a pin, or a diagnostic).
+export def JumpToTarget()
+  var view = CurrentView()
+  if empty(view) || bufnr() != get(view, 'bufnr', -1)
+    return
+  endif
+  var target: any = v:null
+  var best = -1
+  for [key, value] in items(get(view, 'line_targets', {}))
+    var lnum = str2nr(key)
+    if lnum <= line('.') && lnum > best
+      best = lnum
+      target = value
+    endif
+  endfor
+  if type(target) != v:t_dict
+    util.Notify('nothing to jump to from this line')
+    return
+  endif
+  if !bufloaded(view.source_bufnr) || !GoToSource(view)
+    return
+  endif
+  var lnum = min([line('$'), target.line + 1])
+  cursor(lnum, util.ByteColumn(getline(lnum), target.character) + 1)
+  normal! zv
+enddef
+
 export def GoTo()
   var view = CurrentView()
   if empty(view)
@@ -400,22 +495,7 @@ export def GoTo()
     endif
   endif
   if bufnr() == view.bufnr
-    var source_winid = view.source_winid
-    if win_id2win(source_winid) == 0 || winbufnr(win_id2win(source_winid)) != view.source_bufnr
-      source_winid = -1
-      for candidate in win_findbuf(view.source_bufnr)
-        if win_id2tabwin(candidate)[0] == tabpagenr()
-          source_winid = candidate
-          break
-        endif
-      endfor
-    endif
-    if source_winid > 0
-      view.source_winid = source_winid
-      win_gotoid(source_winid)
-    else
-      util.Notify('the infoview source window is no longer open')
-    endif
+    GoToSource(view)
   else
     if &filetype ==# 'lean'
       SetSource(view, bufnr(), win_getid())

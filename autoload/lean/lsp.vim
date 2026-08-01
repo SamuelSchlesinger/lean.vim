@@ -1,6 +1,7 @@
 vim9script
 
 import autoload 'lean/config.vim' as config
+import autoload 'lean/inlayhints.vim' as inlayhints
 import autoload 'lean/util.vim' as util
 
 # A deliberately small LSP 3.17 client for Lean.  Vim has jobs, channels,
@@ -13,9 +14,38 @@ var change_timers: dict<any> = {}
 var last_change_flush_ms: dict<float> = {}
 var diagnostics_by_uri: dict<any> = {}
 var progress_by_uri: dict<any> = {}
+var bufnr_by_uri: dict<number> = {}
+var failed_since_ms: dict<float> = {}
+var progress_timers: dict<number> = {}
+var semantic_timers: dict<number> = {}
 var signs_initialized = false
 var stderr_history: list<string> = []
 var next_request_id = 1
+
+# Window switches re-attach buffers, which restarts a dead server. Without a
+# backoff, a missing lean binary or a crash-looping server would respawn (and
+# renotify) on every WinEnter.
+const RESTART_BACKOFF_MS = 30000.0
+
+def NowMs(): float
+  return reltimefloat(reltime()) * 1000
+enddef
+
+# bufnr({path}) matches patterns, not exact names; prefer the URIs this
+# client opened itself and fall back to an exact whole-list scan.
+def BufnrForUri(uri: string): number
+  var bufnr = get(bufnr_by_uri, uri, -1)
+  if bufnr > 0 && bufexists(bufnr) && util.UriFromBuf(bufnr) ==# uri
+    return bufnr
+  endif
+  return util.FindBuffer(util.PathFromUri(uri))
+enddef
+
+def ForgetUri(uri: string, bufnr: number)
+  if !empty(uri) && get(bufnr_by_uri, uri, -1) == bufnr
+    remove(bufnr_by_uri, uri)
+  endif
+enddef
 
 def AddHistory(message: string)
   if empty(message)
@@ -58,6 +88,11 @@ def FailRequests(server: dict<any>, message: string)
   endfor
 enddef
 
+# Default highlight group for a semantic token type; '' means the type is
+# not rendered. Lean emits keyword/function/variable/property, and variables
+# plus property projections cover most identifiers in a file — coloring them
+# buries the informative tokens, so they default to unstyled. Users opt back
+# in per type with g:lean_config.semantic_highlighting.links.
 def SemanticHighlight(token_type: string): string
   if index(['namespace', 'type', 'class', 'enum', 'interface', 'struct', 'typeParameter'], token_type) >= 0
     return 'Type'
@@ -82,7 +117,18 @@ def SemanticHighlight(token_type: string): string
   elseif token_type ==# 'decorator'
     return 'PreProc'
   endif
-  return 'Identifier'
+  return ''
+enddef
+
+# The configured link wins over the default mapping; an empty string (or a
+# non-string) disables the token type.
+def SemanticGroupFor(token_type: string): string
+  var links = get(config.Get().semantic_highlighting, 'links', {})
+  if type(links) == v:t_dict && has_key(links, token_type)
+    var target = links[token_type]
+    return type(target) == v:t_string ? target : ''
+  endif
+  return SemanticHighlight(token_type)
 enddef
 
 def SemanticTypeName(token_type: string): string
@@ -96,9 +142,17 @@ def EnsureSemanticTypes(server: dict<any>)
   server.semantic_token_types = type(token_types) == v:t_list
     ? filter(copy(token_types), (_, token_type) => type(token_type) == v:t_string)
     : []
+  # Only rendered token types get a group and a text-property type; the
+  # rest are skipped entirely when replies are decoded.
+  server.semantic_groups = {}
   for token_type in server.semantic_token_types
+    var target = SemanticGroupFor(token_type)
+    if empty(target)
+      continue
+    endif
+    server.semantic_groups[token_type] = target
     var name = SemanticTypeName(token_type)
-    execute $'highlight default link {name} {SemanticHighlight(token_type)}'
+    execute $'highlight default link {name} {target}'
     if empty(prop_type_get(name))
       prop_type_add(name, {highlight: name, combine: true})
     endif
@@ -106,7 +160,7 @@ def EnsureSemanticTypes(server: dict<any>)
 enddef
 
 def ClearSemanticTokens(server: dict<any>, bufnr: number)
-  for token_type in get(server, 'semantic_token_types', [])
+  for token_type in keys(get(server, 'semantic_groups', {}))
     try
       prop_remove({type: SemanticTypeName(token_type), all: true, bufnr: bufnr})
     catch
@@ -193,6 +247,10 @@ def OnSemanticTokens(server: dict<any>, bufnr: number, version: number,
     if type_index < 0 || type_index >= len(server.semantic_token_types)
       continue
     endif
+    var token_type = server.semantic_token_types[type_index]
+    if !has_key(get(server, 'semantic_groups', {}), token_type)
+      continue
+    endif
     if line_index < 0 || line_index >= len(lines)
       continue
     endif
@@ -204,7 +262,7 @@ def OnSemanticTokens(server: dict<any>, bufnr: number, version: number,
         || utf16idx(text, end_col) != utf16_column + length
       continue
     endif
-    var type_name = SemanticTypeName(server.semantic_token_types[type_index])
+    var type_name = SemanticTypeName(token_type)
     if !has_key(positions_by_type, type_name)
       positions_by_type[type_name] = []
     endif
@@ -218,12 +276,41 @@ def OnSemanticTokens(server: dict<any>, bufnr: number, version: number,
   AddPropertyBatches(bufnr, positions_by_type)
 enddef
 
+# Trailing debounce: an edit burst issues one full-document token request
+# instead of one per flush. The server object is re-resolved at fire time.
+const SEMANTIC_DEBOUNCE_MS = 200
+
 def RequestSemanticTokens(server: dict<any>, bufnr: number)
+  var key = string(bufnr)
+  if has_key(semantic_timers, key)
+    timer_stop(semantic_timers[key])
+  endif
+  semantic_timers[key] = timer_start(SEMANTIC_DEBOUNCE_MS,
+    (_) => DebouncedSemanticTokens(bufnr))
+enddef
+
+def DebouncedSemanticTokens(bufnr: number)
+  var key = string(bufnr)
+  if has_key(semantic_timers, key)
+    remove(semantic_timers, key)
+  endif
+  if !has_key(buffer_roots, key)
+    return
+  endif
+  var server = get(servers, buffer_roots[key], {})
+  if !empty(server) && get(server, 'initialized', false)
+      && IsCurrentServer(server)
+    SendSemanticTokensRequest(server, bufnr)
+  endif
+enddef
+
+def SendSemanticTokensRequest(server: dict<any>, bufnr: number)
   if !config.Get().semantic_highlighting.enable || !bufloaded(bufnr)
     return
   endif
   var provider = get(server.capabilities, 'semanticTokensProvider', v:null)
-  if type(provider) != v:t_dict || empty(get(server, 'semantic_token_types', []))
+  if type(provider) != v:t_dict || empty(get(server, 'semantic_groups', {}))
+    # No rendered token types means no reason to request tokens at all.
     return
   endif
   var full = get(provider, 'full', false)
@@ -404,6 +491,7 @@ def InitParams(root: string): dict<any>
         applyEdit: true,
         configuration: true,
         workspaceFolders: true,
+        inlayHint: {refreshSupport: true},
         workspaceEdit: {
           documentChanges: true,
           # Every edit is preflighted and unexpected commit failures are
@@ -414,6 +502,20 @@ def InitParams(root: string): dict<any>
       },
       textDocument: {
         synchronization: {didSave: true, dynamicRegistration: false},
+        completion: {
+          dynamicRegistration: false,
+          contextSupport: true,
+          completionItem: {
+            snippetSupport: false,
+            commitCharactersSupport: false,
+            documentationFormat: ['markdown', 'plaintext'],
+            deprecatedSupport: true,
+            preselectSupport: false,
+            insertReplaceSupport: true,
+            resolveSupport: {properties: ['documentation', 'detail']},
+          },
+          completionItemKind: {valueSet: range(1, 25)},
+        },
         hover: {contentFormat: ['markdown', 'plaintext']},
         definition: {linkSupport: true},
         declaration: {linkSupport: true},
@@ -434,6 +536,7 @@ def InitParams(root: string): dict<any>
           versionSupport: true,
           tagSupport: {valueSet: [1, 2]},
         },
+        inlayHint: {dynamicRegistration: false},
         semanticTokens: {
           dynamicRegistration: false,
           requests: {range: false, full: true},
@@ -512,10 +615,12 @@ def SendDidOpen(server: dict<any>, bufnr: number, dependency_mode: string = 'nev
   # Track ownership even for a server which opts out of open/close messages;
   # otherwise every WinEnter would repeat setup and semantic-token requests.
   server.opened[key] = uri
+  bufnr_by_uri[uri] = bufnr
   server.synced_texts[key] = text
   setbufvar(bufnr, 'lean_lsp_attached', true)
   setbufvar(bufnr, 'lean_lsp_uri', uri)
   RequestSemanticTokens(server, bufnr)
+  inlayhints.OnBufferSynced(bufnr)
 enddef
 
 def OnInitialized(server: dict<any>, result: any, error: any)
@@ -524,6 +629,7 @@ def OnInitialized(server: dict<any>, result: any, error: any)
   endif
   if type(error) == v:t_dict
     server.failed = true
+    failed_since_ms[server.root] = NowMs()
     FailRequests(server,
       $'Lean language server initialization failed: {get(error, "message", string(error))}')
     util.Notify($'language server initialization failed: {get(error, "message", string(error))}', 'ErrorMsg')
@@ -540,6 +646,7 @@ def OnInitialized(server: dict<any>, result: any, error: any)
   if type(position_encoding) != v:t_string || position_encoding !=# 'utf-16'
     server.initialized = false
     server.failed = true
+    failed_since_ms[server.root] = NowMs()
     var message = $'Lean language server selected unsupported position encoding {string(position_encoding)}'
     FailRequests(server, message)
     util.Notify(message, 'ErrorMsg')
@@ -595,6 +702,7 @@ def OnExit(server: dict<any>, _job: job, status: number)
     endif
   endfor
   if !server.stopping
+    failed_since_ms[server.root] = NowMs()
     FailRequests(server, $'Lean language server exited with status {status}')
     util.Notify($'language server exited with status {status}', status == 0 ? 'WarningMsg' : 'ErrorMsg')
     silent doautocmd <nomodeline> User LeanDiagnosticsUpdate
@@ -650,7 +758,7 @@ def ValidRange(range: any, line_count: number): bool
   if type(range) != v:t_dict
       || type(get(range, 'start', v:null)) != v:t_dict
       || type(get(range, 'end', v:null)) != v:t_dict
-  return false
+    return false
   endif
   var values = [
     get(range.start, 'line', v:null),
@@ -699,6 +807,7 @@ def ClearBufferDecorations(server: dict<any>, bufnr: number, clear_state: bool =
   sign_unplace('lean-progress', {buffer: bufnr})
   ClearDiagnosticProperties(bufnr)
   ClearSemanticTokens(server, bufnr)
+  inlayhints.Clear(bufnr)
   if clear_state && !empty(bufname(bufnr))
     ClearUriState(util.UriFromBuf(bufnr))
   endif
@@ -708,15 +817,14 @@ def NotificationIsStale(uri: string, version: any): bool
   if type(version) != v:t_number
     return false
   endif
-  var bufnr = bufnr(util.PathFromUri(uri))
+  var bufnr = BufnrForUri(uri)
   return bufnr >= 0 && bufloaded(bufnr)
     && version < getbufvar(bufnr, 'lean_lsp_version', 0)
 enddef
 
 def RenderDiagnostics(uri: string, diagnostics: list<any>)
   EnsureSigns()
-  var path = util.PathFromUri(uri)
-  var bufnr = bufnr(path)
+  var bufnr = BufnrForUri(uri)
   if bufnr < 0 || !bufloaded(bufnr)
     return
   endif
@@ -809,14 +917,24 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
   AddPropertyBatches(bufnr, positions_by_type)
 enddef
 
+# Lean's first progress notification typically covers the whole rest of the
+# file; per-line signs over thousands of lines are wasteful. Only the visible
+# span (plus margin) is decorated, re-rendered on scroll, with a hard cap.
+const PROGRESS_MARGIN_LINES = 20
+const MAX_PROGRESS_SIGNS = 1000
+
 def RenderProgress(uri: string, processing: list<any>)
   EnsureSigns()
-  var bufnr = bufnr(util.PathFromUri(uri))
+  var bufnr = BufnrForUri(uri)
   if bufnr < 0 || !bufloaded(bufnr)
     return
   endif
   sign_unplace('lean-progress', {buffer: bufnr})
   if !config.Get().progress_bars.enable
+    return
+  endif
+  var span = util.VisibleLineSpan(bufnr, PROGRESS_MARGIN_LINES)
+  if empty(span)
     return
   endif
   var line_count = len(getbufline(bufnr, 1, '$'))
@@ -830,12 +948,15 @@ def RenderProgress(uri: string, processing: list<any>)
     if !ValidRange(range, line_count)
       continue
     endif
-    var first = max([0, range.start.line])
-    var last = min([line_count - 1, range.end.line])
+    var first = max([span[0] - 1, max([0, range.start.line])])
+    var last = min([span[1] - 1, min([line_count - 1, range.end.line])])
     if last < first
       continue
     endif
     for line_index in range(first, last)
+      if len(signs) >= MAX_PROGRESS_SIGNS
+        break
+      endif
       add(signs, {
         id: sign_id,
         group: 'lean-progress',
@@ -850,6 +971,54 @@ def RenderProgress(uri: string, processing: list<any>)
   if !empty(signs)
     sign_placelist(signs)
   endif
+enddef
+
+# Re-render cached progress decorations, e.g. after a scroll moved the
+# visible span or a hidden buffer became visible again.
+export def RefreshProgress(bufnr: number)
+  if !bufloaded(bufnr) || empty(bufname(bufnr))
+    return
+  endif
+  var uri = getbufvar(bufnr, 'lean_lsp_uri', '')
+  if empty(uri)
+    uri = util.UriFromBuf(bufnr)
+  endif
+  if has_key(progress_by_uri, uri)
+    RenderProgress(uri, progress_by_uri[uri])
+  endif
+enddef
+
+def DebouncedProgressRender(bufnr: number)
+  var key = string(bufnr)
+  if has_key(progress_timers, key)
+    remove(progress_timers, key)
+  endif
+  RefreshProgress(bufnr)
+enddef
+
+def ScheduleProgressRender(bufnr: number)
+  var key = string(bufnr)
+  if has_key(progress_timers, key)
+    timer_stop(progress_timers[key])
+  endif
+  progress_timers[key] = timer_start(100, (_) => DebouncedProgressRender(bufnr))
+enddef
+
+export def OnWinScrolled()
+  var scrolled = filter(keys(v:event), (_, key) => key !=# 'all')
+  if empty(scrolled)
+    # Called outside a WinScrolled autocmd: refresh every attached buffer.
+    for key in keys(buffer_roots)
+      ScheduleProgressRender(str2nr(key))
+    endfor
+    return
+  endif
+  for window_key in scrolled
+    var bufnr = winbufnr(str2nr(window_key))
+    if bufnr > 0 && getbufvar(bufnr, 'lean_lsp_attached', false)
+      ScheduleProgressRender(bufnr)
+    endif
+  endfor
 enddef
 
 def OwnsUri(server: dict<any>, uri: string): bool
@@ -1055,6 +1224,11 @@ def HandleServerRequest(root: string, server: dict<any>, message: dict<any>)
   elseif method ==# 'workspace/semanticTokens/refresh'
     Respond(server, message.id, v:null)
     RefreshSemanticTokens(server)
+  elseif method ==# 'workspace/inlayHint/refresh'
+    Respond(server, message.id, v:null)
+    for buffer_key in keys(server.buffers)
+      inlayhints.OnBufferSynced(str2nr(buffer_key))
+    endfor
   elseif method ==# 'window/showMessageRequest'
     HandleShowMessageRequest(server, message, params)
   else
@@ -1093,23 +1267,27 @@ def OnStdout(server: dict<any>, _channel: channel, chunk: string)
   var root = server.root
   server.recv ..= chunk
   while true
-    var header_end = stridx(server.recv, "\r\n\r\n")
-    if header_end < 0
-      return
-    endif
-    var header = strpart(server.recv, 0, header_end)
-    var length_text = matchstr(header, '\cContent-Length:\s*\zs\d\+')
-    if empty(length_text)
+    # body_length caches the parsed header between chunks so a body arriving
+    # in many pieces is not re-scanned for its header every time.
+    if server.body_length < 0
+      var header_end = stridx(server.recv, "\r\n\r\n")
+      if header_end < 0
+        return
+      endif
+      var header = strpart(server.recv, 0, header_end)
+      var length_text = matchstr(header, '\cContent-Length:\s*\zs\d\+')
       server.recv = strpart(server.recv, header_end + 4)
-      continue
+      if empty(length_text)
+        continue
+      endif
+      server.body_length = str2nr(length_text)
     endif
-    var body_length = str2nr(length_text)
-    var body_start = header_end + 4
-    if strlen(server.recv) < body_start + body_length
+    if strlen(server.recv) < server.body_length
       return
     endif
-    var body = strpart(server.recv, body_start, body_length)
-    server.recv = strpart(server.recv, body_start + body_length)
+    var body = strpart(server.recv, 0, server.body_length)
+    server.recv = strpart(server.recv, server.body_length)
+    server.body_length = -1
     var decoded: any = v:null
     try
       decoded = json_decode(body)
@@ -1132,11 +1310,13 @@ def StartServer(root: string): dict<any>
     pending: {},
     queue: [],
     recv: '',
+    body_length: -1,
     buffers: {},
     opened: {},
     synced_texts: {},
     semantic_requests: {},
     semantic_generations: {},
+    semantic_groups: {},
     capabilities: {},
     initialized: false,
     failed: false,
@@ -1172,16 +1352,22 @@ def StartServer(root: string): dict<any>
   catch
     server.failed = true
     server.running = false
+    failed_since_ms[root] = NowMs()
     if has_key(server, 'job') && job_status(server.job) ==# 'run'
       job_stop(server.job)
     endif
-    util.Notify($'cannot start Lean language server: {v:exception}', 'ErrorMsg')
+    util.Notify($'cannot start Lean language server: {v:exception}'
+      .. '; not retrying automatically, use :LeanRestartServer', 'ErrorMsg')
   endtry
   return server
 enddef
 
 def EnsureServer(root: string): dict<any>
   if has_key(servers, root) && servers[root].running
+    return servers[root]
+  endif
+  if has_key(servers, root)
+      && NowMs() - get(failed_since_ms, root, -RESTART_BACKOFF_MS) < RESTART_BACKOFF_MS
     return servers[root]
   endif
   return StartServer(root)
@@ -1229,6 +1415,12 @@ export def Detach(bufnr: number)
   if has_key(change_timers, key)
     timer_stop(remove(change_timers, key))
   endif
+  if has_key(progress_timers, key)
+    timer_stop(remove(progress_timers, key))
+  endif
+  if has_key(semantic_timers, key)
+    timer_stop(remove(semantic_timers, key))
+  endif
   if has_key(last_change_flush_ms, key)
     remove(last_change_flush_ms, key)
   endif
@@ -1272,6 +1464,7 @@ export def Detach(bufnr: number)
   endif
   ClearBufferDecorations(server, bufnr, true)
   ClearUriState(uri)
+  ForgetUri(uri, bufnr)
   setbufvar(bufnr, 'lean_lsp_attached', false)
   setbufvar(bufnr, 'lean_lsp_uri', '')
 enddef
@@ -1308,8 +1501,9 @@ def FlushChange(bufnr: number)
     contentChanges: content_changes,
   })
   server.synced_texts[key] = current_text
-  last_change_flush_ms[key] = reltimefloat(reltime()) * 1000
+  last_change_flush_ms[key] = NowMs()
   RequestSemanticTokens(server, bufnr)
+  inlayhints.OnBufferSynced(bufnr)
 enddef
 
 export def DidChange(bufnr: number)
@@ -1319,8 +1513,7 @@ export def DidChange(bufnr: number)
   endif
   var delay = max([0, config.Get().lsp.change_delay])
   if !has_key(change_timers, key)
-      && reltimefloat(reltime()) * 1000
-        - get(last_change_flush_ms, key, -1.0) >= delay
+      && NowMs() - get(last_change_flush_ms, key, -1.0) >= delay
     FlushChange(bufnr)
     return
   endif
@@ -1466,6 +1659,9 @@ def FinishStop(server: dict<any>, _result: any, _error: any)
 enddef
 
 def StopServer(root: string)
+  if has_key(failed_since_ms, root)
+    remove(failed_since_ms, root)
+  endif
   if !has_key(servers, root)
     return
   endif
@@ -1495,6 +1691,8 @@ enddef
 export def RestartServer(bufnr: number)
   var key = string(bufnr)
   if !has_key(buffer_roots, key)
+    # A manual restart always retries, even inside the failure backoff.
+    failed_since_ms = {}
     Attach(bufnr)
     return
   endif
@@ -1508,6 +1706,7 @@ export def RestartServer(bufnr: number)
 enddef
 
 export def StopAll()
+  failed_since_ms = {}
   for root in copy(keys(servers))
     StopServer(root)
   endfor
@@ -1515,6 +1714,14 @@ export def StopAll()
     timer_stop(timer)
   endfor
   change_timers = {}
+  for timer in values(progress_timers)
+    timer_stop(timer)
+  endfor
+  progress_timers = {}
+  for timer in values(semantic_timers)
+    timer_stop(timer)
+  endfor
+  semantic_timers = {}
   last_change_flush_ms = {}
   for key in keys(buffer_roots)
     var bufnr = str2nr(key)
@@ -1523,6 +1730,22 @@ export def StopAll()
     endif
   endfor
   buffer_roots = {}
+enddef
+
+export def Capabilities(bufnr: number): dict<any>
+  var key = string(bufnr)
+  if !has_key(buffer_roots, key)
+    return {}
+  endif
+  var server = get(servers, buffer_roots[key], {})
+  var capabilities = get(server, 'capabilities', {})
+  return type(capabilities) == v:t_dict ? capabilities : {}
+enddef
+
+# Push any pending buffer text to the server immediately. Features that query
+# at the cursor (completion) must not race the change debounce.
+export def Flush(bufnr: number)
+  FlushChange(bufnr)
 enddef
 
 export def Diagnostics(uri: string): list<any>
@@ -1558,6 +1781,49 @@ export def ProgressAt(bufnr: number, line_index: number): bool
     endif
   endfor
   return false
+enddef
+
+# Statusline helpers: how much of the buffer is still elaborating, and the
+# non-silent diagnostic counts.
+export def ProgressSummary(bufnr: number): dict<any>
+  var line_count = max([1, len(getbufline(bufnr, 1, '$'))])
+  var covered = 0
+  for info in get(progress_by_uri, util.UriFromBuf(bufnr), [])
+    if type(info) != v:t_dict
+      continue
+    endif
+    var range = get(info, 'range', {})
+    if !ValidRange(range, line_count)
+      continue
+    endif
+    var first = max([0, range.start.line])
+    var last = min([line_count - 1, range.end.line])
+    if last >= first
+      covered += last - first + 1
+    endif
+  endfor
+  return {
+    processing: covered > 0,
+    percent: min([100, covered * 100 / line_count]),
+  }
+enddef
+
+export def DiagnosticCounts(bufnr: number): dict<number>
+  var counts = {error: 0, warning: 0}
+  for diagnostic in Diagnostics(util.UriFromBuf(bufnr))
+    if type(diagnostic) != v:t_dict
+        || get(diagnostic, 'isSilent', false)
+        || !empty(get(diagnostic, 'leanTags', []))
+      continue
+    endif
+    var severity = get(diagnostic, 'severity', 1)
+    if severity == 1
+      counts.error += 1
+    elseif severity == 2
+      counts.warning += 1
+    endif
+  endfor
+  return counts
 enddef
 
 export def Stderr(): list<string>

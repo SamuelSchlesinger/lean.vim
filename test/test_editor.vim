@@ -176,6 +176,90 @@ assert_true(WaitFor(() => RpcHas('codeAction/resolve')),
 assert_true(WaitFor(() => RpcHas('workspace/executeCommand', 'fake.resolvedAction')),
   'resolved code-action command was not executed')
 
+# <CR> in the infoview jumps the source window to the rendered entry.
+edit!
+cursor(2, 3)
+lean#InfoviewOpen()
+assert_true(WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
+  'infoview goal did not render for the jump test')
+lean#InfoviewAddPin()
+assert_true(WaitFor(() => len(get(lean#InfoviewState(), 'pins', [])) == 1),
+  'pin was not added for the jump test')
+var jump_view = lean#InfoviewState()
+var pin_lnum = indexof(getbufline(jump_view.bufnr, 1, '$'),
+  (_, text) => text =~# '^Pin ') + 1
+assert_true(pin_lnum > 0, 'pin header was not rendered')
+win_gotoid(bufwinid(jump_view.bufnr))
+assert_false(empty(maparg('<CR>', 'n')), 'infoview <CR> mapping was not installed')
+cursor(pin_lnum, 1)
+lean#infoview#JumpToTarget()
+assert_equal('Editor.lean', expand('%:t'), '<CR> jump did not focus the source window')
+assert_equal([2, 3], [line('.'), col('.')], '<CR> jump missed the pin position')
+lean#InfoviewClearPins()
+lean#InfoviewClose()
+
+# :LeanDiagnosticsList collects real diagnostics and skips decoration-only
+# entries (silent goals, goal markers).
+assert_true(WaitFor(() => !empty(lean#lsp#Diagnostics(lean#util#UriFromBuf(bufnr())))),
+  'diagnostics were not republished for the loclist test')
+lean#DiagnosticsList()
+var loclist = getloclist(0)
+assert_equal(1, len(loclist), 'diagnostics loclist should hold exactly the real warning')
+assert_equal(2, loclist[0].lnum, 'diagnostics loclist used the wrong line')
+assert_equal('W', loclist[0].type, 'diagnostics loclist used the wrong severity type')
+assert_equal('test warning', loclist[0].text, 'diagnostics loclist used the wrong text')
+lclose
+
+# The document outline flattens hierarchical symbols with depth indenting.
+lean#Outline()
+assert_true(WaitFor(() => get(getloclist(0, {title: 1}), 'title', '') ==# 'Lean outline'),
+  'outline did not populate the location list')
+var outline = getloclist(0)
+assert_equal(2, len(outline), 'outline item count')
+assert_equal('answer [constant]', outline[0].text, 'outline top-level entry')
+# Line 1 is `-- α😊target`: UTF-16 character 4 is the emoji at byte 5.
+assert_equal([1, 6], [outline[0].lnum, outline[0].col], 'outline selectionRange position')
+assert_equal('  nested [function]', outline[1].text, 'outline child entry was not indented')
+lclose
+
+# Workspace symbol search fills the quickfix list with kind labels.
+lean#WorkspaceSymbols('succ')
+assert_true(WaitFor(() => get(getqflist({title: 1}), 'title', '') =~# 'workspace symbols'),
+  'workspace symbols did not populate quickfix')
+var symbols = getqflist()
+assert_equal(1, len(symbols), 'workspace symbol count')
+assert_match('Nat\.succ_le \[theorem\] (Nat)', symbols[0].text,
+  'workspace symbol text lacked the kind and container labels')
+cclose
+
+# Statusline component reports diagnostic counts for attached buffers.
+assert_match('W:1', lean#StatuslineProgress(),
+  'statusline component did not report the warning count')
+
+# Loogle: response parsing is pure, and network access is opt-in.
+var loogle_parsed = lean#loogle#ParseResponse(
+  '{"hits": [{"name": "Nat.succ", "type": "Nat → Nat", "module": "Init.Prelude"}]}')
+assert_true(loogle_parsed.ok, 'valid Loogle response failed to parse')
+assert_equal([{name: 'Nat.succ', type: 'Nat → Nat', module: 'Init.Prelude'}],
+  loogle_parsed.hits, 'Loogle hits were not extracted')
+var loogle_error = lean#loogle#ParseResponse('{"error": "unknown identifier"}')
+assert_false(loogle_error.ok, 'a Loogle error response was treated as success')
+assert_equal('unknown identifier', loogle_error.error)
+assert_false(lean#loogle#ParseResponse('not json').ok,
+  'invalid JSON from Loogle was treated as success')
+lean#Loogle('Nat.succ')
+assert_match('Loogle is disabled', execute('messages'),
+  ':LeanLoogle did not explain the opt-in flag while disabled')
+
+# :LeanHealth renders a self-contained report.
+lean#Health()
+assert_match('lean.vim health', getline(1), ':LeanHealth did not open its report')
+var health_text = join(getline(1, '$'), "\n")
+assert_match('uri_encode(): ok', health_text, 'health report skipped builtin checks')
+assert_match('project root:', health_text, 'health report skipped the project root')
+assert_match('server initialized: true', health_text, 'health report skipped server state')
+close
+
 lean#Stop()
 sleep 50m
 delete(rpc_log)
