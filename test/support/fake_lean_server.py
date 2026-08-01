@@ -12,6 +12,7 @@ from typing import Any, BinaryIO
 stream_in: BinaryIO = sys.stdin.buffer
 stream_out: BinaryIO = sys.stdout.buffer
 log_path = pathlib.Path(sys.argv[1])
+sync_kind = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 
 
 def log(message: dict[str, Any]) -> None:
@@ -57,7 +58,7 @@ def handle_request(message: dict[str, Any]) -> None:
             message,
             {
                 "capabilities": {
-                    "textDocumentSync": 2,
+                    "textDocumentSync": sync_kind,
                     "hoverProvider": True,
                     "definitionProvider": True,
                     "codeActionProvider": True,

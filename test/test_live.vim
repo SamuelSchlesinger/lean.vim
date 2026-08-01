@@ -35,7 +35,7 @@ win_gotoid(state.source_winid)
 setline(2, '  exact True')
 lean#OnChanged(state.source_bufnr)
 assert_true(WaitFor(() => !empty(lean#lsp#DiagnosticsAt(state.source_bufnr, 1))),
-  'real Lean server did not accept the full-document didChange notification')
+  'real Lean server did not accept the incremental didChange notification')
 
 lean#InfoviewClose()
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean')

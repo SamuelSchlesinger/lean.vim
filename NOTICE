@@ -1,16 +1,57 @@
-This project is an independent Vim9 port inspired by Julian Berman's
-lean.nvim (https://github.com/Julian/lean.nvim).
+lean.vim third-party notices
+============================
 
-The following files are copied or adapted from lean.nvim at commit
-e05c0f821412337259b98cc732ff0cf6ac7afe0c under the MIT License:
+lean.nvim (MIT)
+---------------
 
-  data/lean/abbreviations.json
+This project is an independent Vim9 port modeled after lean.nvim:
+
+  https://github.com/Julian/lean.nvim
+
+The port was built against lean.nvim commit
+e05c0f821412337259b98cc732ff0cf6ac7afe0c. The following files are copied
+byte-for-byte from that revision under lean.nvim's MIT license:
+
   data/lean/snippets.json
   snippets/lean.json
   syntax/lean.vim
 
-The original lean.nvim copyright notice is:
+The following Vim9 files translate or adapt portions of lean.nvim's behavior
+or implementation and are also distributed under the MIT license:
+
+  autoload/lean/abbreviations.vim
+  ftplugin/lean.vim
+  indent/lean.vim
+
+The wider plugin follows lean.nvim's public commands, mappings, feature
+organization, and editor behavior. See ACKNOWLEDGEMENTS.md for fuller credit.
+
+The original lean.nvim copyright and permission notice is reproduced in the
+root LICENSE file:
 
   Copyright (c) 2020 Julian Berman
 
-See LICENSE for the full MIT license text.
+Lean Unicode abbreviations (Apache-2.0)
+---------------------------------------
+
+data/lean/abbreviations.json is copied byte-for-byte from
+leanprover/vscode-lean4's lean4-unicode-input/src/abbreviations.json. It is
+licensed under Apache-2.0, not MIT. This repository obtained it through the
+copy synchronized into lean.nvim at the pinned revision above.
+
+The corresponding vscode-lean4 revision checked during the license audit was:
+
+  5a25e6abb2e973b4c89a053acc74c479c0bb2e9f
+
+Both files had SHA-256:
+
+  d5c529fdeb62071d6d16d51e3274a638165833a8c8cfdf02b379e051cbe22f27
+
+The full Apache-2.0 license is in LICENSES/Apache-2.0.txt.
+
+Excluded upstream artwork
+-------------------------
+
+No lean.nvim logo, Neovim logo, Lean logo, image, or other artwork is included
+in this repository. The Creative Commons and logo notices shipped by
+lean.nvim therefore do not pertain to this distribution.

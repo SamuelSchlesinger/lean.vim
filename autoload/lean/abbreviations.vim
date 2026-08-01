@@ -1,9 +1,14 @@
 vim9script
 
+# Adapted from lean.nvim's lua/lean/abbreviations.lua.
+# SPDX-License-Identifier: MIT
+
 import autoload 'lean/config.vim' as config
 import autoload 'lean/util.vim' as util
 
 var base_abbreviations: dict<string> = {}
+var all_abbreviations: dict<string> = {}
+var sources_by_initial: dict<list<string>> = {}
 
 def Load(): dict<string>
   if !empty(base_abbreviations)
@@ -23,20 +28,37 @@ def Load(): dict<string>
 enddef
 
 def All(): dict<string>
-  var result = copy(Load())
-  extend(result, config.Get().abbreviations.extra, 'force')
-  return result
+  if empty(all_abbreviations)
+    all_abbreviations = copy(Load())
+    extend(all_abbreviations, config.Get().abbreviations.extra, 'force')
+    for source in keys(all_abbreviations)
+      if empty(source)
+        continue
+      endif
+      var initial = strpart(source, 0, 1)
+      if !has_key(sources_by_initial, initial)
+        sources_by_initial[initial] = []
+      endif
+      add(sources_by_initial[initial], source)
+    endfor
+  endif
+  return all_abbreviations
 enddef
 
 def CommonPrefixLength(left: string, right: string): number
   var maximum = min([strlen(left), strlen(right)])
   var length = 0
-  for index in range(maximum)
-    if index == maximum || left[index] !=# right[index]
-      break
-    endif
+  while length < maximum
+      && strpart(left, length, 1) ==# strpart(right, length, 1)
     length += 1
-  endfor
+  endwhile
+  # A bytewise match between different UTF-8 code points can stop inside a
+  # character. Conversion consumes bytes, so return only a shared boundary.
+  while length > 0
+      && (byteidx(left, charidx(left, length)) != length
+        || byteidx(right, charidx(right, length)) != length)
+    length -= 1
+  endwhile
   return length
 enddef
 
@@ -50,10 +72,21 @@ export def ConvertText(text: string): string
     return leader .. ConvertText(strpart(rest, strlen(leader)))
   endif
 
+  var abbreviations = All()
+  # Almost all interactive conversions are complete abbreviations. Avoid an
+  # O(vocabulary-size) longest-prefix scan for that common case.
+  if !empty(rest) && has_key(abbreviations, rest)
+    return abbreviations[rest]
+  endif
+
   var match_length = 0
   var source_length = 999999
   var replacement = ''
-  for [source, target] in items(All())
+  # A candidate with a different first byte has a zero-length common prefix
+  # and can never win. The index keeps the less common partial-match path
+  # equivalent while avoiding a scan of the full vocabulary.
+  for source in get(sources_by_initial, strpart(rest, 0, 1), [])
+    var target = abbreviations[source]
     var current = CommonPrefixLength(rest, source)
     if current > match_length || (current == match_length && strlen(source) < source_length)
       match_length = current

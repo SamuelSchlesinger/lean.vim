@@ -231,6 +231,7 @@ export def Open(bufnr: number = bufnr())
       source_winid: source_winid,
       sequence: 0,
       timer: -1,
+      pending_bufnr: -1,
       position: util.Position(bufnr),
       goal: [],
       term_goal: [],
@@ -327,10 +328,15 @@ export def Update(bufnr: number = bufnr())
     (result, error) => OnTermGoal(key, sequence, result, error))
 enddef
 
-def TimerUpdate(key: string, bufnr: number)
+def TimerUpdate(key: string)
   if has_key(views, key)
-    views[key].timer = -1
-    Update(bufnr)
+    var view = views[key]
+    view.timer = -1
+    if view.pending_bufnr >= 0
+      var bufnr = view.pending_bufnr
+      view.pending_bufnr = -1
+      Update(bufnr)
+    endif
   endif
 enddef
 
@@ -340,11 +346,21 @@ export def ScheduleUpdate(bufnr: number = bufnr())
     return
   endif
   var view = views[key]
-  if view.timer >= 0
+  var cooldown = config.Get().infoview.update_cooldown
+  if cooldown == 0
+    Update(bufnr)
+    return
+  endif
+  if view.timer < 0
+    # Match lean.nvim's leading edge: a deliberate cursor move updates now.
+    Update(bufnr)
+  else
+    view.pending_bufnr = bufnr
     timer_stop(view.timer)
   endif
-  view.timer = timer_start(config.Get().infoview.update_delay,
-    (_) => TimerUpdate(key, bufnr))
+  # Further events restart the cooldown. The most recent suppressed update is
+  # flushed after movement stops, so rapid cursor motion does not flood Lean.
+  view.timer = timer_start(cooldown, (_) => TimerUpdate(key))
 enddef
 
 def OnPopupGoal(title: string, result: any, error: any)

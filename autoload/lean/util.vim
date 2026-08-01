@@ -29,6 +29,108 @@ export def BufText(bufnr: number): string
   return text
 enddef
 
+const DIFF_CHUNK_BYTES = 4096
+
+def IsByteBoundary(text: string, index: number): bool
+  if index <= 0 || index >= strlen(text)
+    return true
+  endif
+  return byteidx(text, charidx(text, index)) == index
+enddef
+
+def CommonPrefixBytes(old_text: string, new_text: string): number
+  var maximum = min([strlen(old_text), strlen(new_text)])
+  var prefix = 0
+  while prefix + DIFF_CHUNK_BYTES <= maximum
+      && strpart(old_text, prefix, DIFF_CHUNK_BYTES)
+        ==# strpart(new_text, prefix, DIFF_CHUNK_BYTES)
+    prefix += DIFF_CHUNK_BYTES
+  endwhile
+  # The first unequal chunk contains the boundary. Find it logarithmically;
+  # thousands of one-byte strpart() calls are disproportionately expensive in
+  # Vim script on large documents.
+  var low = prefix
+  var high = min([maximum, prefix + DIFF_CHUNK_BYTES - 1])
+  while low < high
+    var middle = (low + high + 1) / 2
+    if strpart(old_text, prefix, middle - prefix)
+        ==# strpart(new_text, prefix, middle - prefix)
+      low = middle
+    else
+      high = middle - 1
+    endif
+  endwhile
+  prefix = low
+  # Equal UTF-8 byte prefixes can end within two different code points. LSP
+  # ranges must never bisect either code point.
+  while prefix > 0
+      && (!IsByteBoundary(old_text, prefix) || !IsByteBoundary(new_text, prefix))
+    prefix -= 1
+  endwhile
+  return prefix
+enddef
+
+def CommonSuffixBytes(old_text: string, new_text: string, prefix: number): number
+  var old_length = strlen(old_text)
+  var new_length = strlen(new_text)
+  var maximum = min([old_length - prefix, new_length - prefix])
+  var suffix = 0
+  while suffix + DIFF_CHUNK_BYTES <= maximum
+      && strpart(old_text, old_length - suffix - DIFF_CHUNK_BYTES, DIFF_CHUNK_BYTES)
+        ==# strpart(new_text, new_length - suffix - DIFF_CHUNK_BYTES, DIFF_CHUNK_BYTES)
+    suffix += DIFF_CHUNK_BYTES
+  endwhile
+  var low = suffix
+  var high = min([maximum, suffix + DIFF_CHUNK_BYTES - 1])
+  while low < high
+    var middle = (low + high + 1) / 2
+    if strpart(old_text, old_length - middle, middle - suffix)
+        ==# strpart(new_text, new_length - middle, middle - suffix)
+      low = middle
+    else
+      high = middle - 1
+    endif
+  endwhile
+  suffix = low
+  # Move a bytewise suffix forward until it begins at a UTF-8 boundary in
+  # both documents.
+  while suffix > 0
+      && (!IsByteBoundary(old_text, old_length - suffix)
+        || !IsByteBoundary(new_text, new_length - suffix))
+    suffix -= 1
+  endwhile
+  return suffix
+enddef
+
+def PositionInText(text: string, byte_offset: number): dict<number>
+  var offset = max([0, min([byte_offset, strlen(text)])])
+  var before = strpart(text, 0, offset)
+  var line = count(before, "\n")
+  var last_newline = strridx(before, "\n")
+  var line_prefix = strpart(before, last_newline + 1)
+  return {
+    line: line,
+    character: max([0, utf16idx(line_prefix, strlen(line_prefix))]),
+  }
+enddef
+
+# Return one incremental LSP content change which transforms old_text exactly
+# into new_text. Coalescing to one replacement makes arbitrary edit bursts
+# safe while avoiding a full-document payload.
+export def IncrementalChange(old_text: string, new_text: string): dict<any>
+  var prefix = CommonPrefixBytes(old_text, new_text)
+  var suffix = CommonSuffixBytes(old_text, new_text, prefix)
+  var old_end = strlen(old_text) - suffix
+  var new_end = strlen(new_text) - suffix
+  return {
+    range: {
+      start: PositionInText(old_text, prefix),
+      end: PositionInText(old_text, old_end),
+    },
+    text: strpart(new_text, prefix, new_end - prefix),
+  }
+enddef
+
 export def UriFromPath(path: string): string
   var absolute = fnamemodify(path, ':p')
   return 'file://' .. substitute(uri_encode(absolute), '%2F', '/', 'g')
@@ -86,6 +188,10 @@ def EditOffset(lines: list<string>, position: dict<any>): number
     offset += strlen(lines[index]) + 1
   endfor
   return offset + ByteColumn(lines[line_index], position.character)
+enddef
+
+export def TextOffset(text: string, position: dict<any>): number
+  return EditOffset(split(text, "\n", true), position)
 enddef
 
 def SetBufferText(bufnr: number, text: string)

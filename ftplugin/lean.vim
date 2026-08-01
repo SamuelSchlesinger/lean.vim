@@ -1,5 +1,8 @@
 vim9script
 
+# Adapted from lean.nvim's ftplugin/lean/lean.lua.
+# SPDX-License-Identifier: MIT
+
 if exists('b:did_ftplugin')
   finish
 endif

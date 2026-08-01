@@ -5,6 +5,10 @@ A Vim9-native Lean 4 environment, modeled after
 server directly over Vim jobs and channels; Neovim and an external LSP client
 are not required.
 
+This project owes an enormous debt to Julian Berman and the lean.nvim
+community. See [Acknowledgements](ACKNOWLEDGEMENTS.md) for our thanks and the
+specific upstream work that made this port possible.
+
 The implementation was built against lean.nvim `main` at
 `e05c0f821412337259b98cc732ff0cf6ac7afe0c` (2026-07-30). See
 [FUNCTIONALITY.md](FUNCTIONALITY.md) for the reviewed feature inventory and
@@ -69,12 +73,16 @@ The main options are:
 | `abbreviations.leader` | `\` | Prefix used for abbreviations |
 | `infoview.autoopen` | `v:true` | Open the plain-text infoview for Lean buffers |
 | `infoview.orientation` | `auto` | `auto`, `vertical`, or `horizontal` |
+| `infoview.update_cooldown` | `50` | Throttle cursor-driven refreshes in milliseconds (`0` disables throttling) |
 | `lsp.enable` | `v:true` | Start the built-in Lean-specific LSP client |
 | `lsp.command` | `[]` | Override the server argv list |
-| `lsp.change_delay` | `50` | Milliseconds used to debounce document changes |
+| `lsp.change_delay` | `50` | Trailing debounce for edit bursts; isolated edits flush immediately |
 | `progress_bars.enable` | `v:true` | Show processing ranges in the sign column |
 | `semantic_highlighting.enable` | `v:true` | Render LSP semantic tokens as text properties |
 | `signs.enable` | `v:true` | Render diagnostic and Lean goal signs |
+
+The original `infoview.update_delay` name remains accepted as an alias for
+`infoview.update_cooldown`.
 
 Run `:help lean-vim9-configuration` for all accepted keys.
 
@@ -130,14 +138,18 @@ exist for command-name compatibility and explain this boundary when invoked.
 make lint       # compile every Vim9 module
 make test       # fake-server transport and editor integration
 make test-live  # end-to-end check against the installed Lean server
+make license-check # verify pinned third-party files and required notices
 ```
 
 The fake server test covers split JSON-RPC frames, initialization, diagnostics,
-progress, goals, term goals, semantic tokens, full document changes, restart
-semantics, workspace edits, and Unicode abbreviation insertion. The live test
-checks goal retrieval and diagnostic updates against a real Lean process.
+progress, goals, term goals, semantic tokens, UTF-16 incremental document
+changes, restart semantics, workspace edits, and Unicode abbreviation
+insertion. The live test checks goal retrieval and diagnostic updates against
+a real Lean process.
 
 ## License
 
-MIT. The Lean syntax, snippets, and abbreviation data retain lean.nvim's MIT
-license and attribution; see [NOTICE](NOTICE).
+The port and the retained lean.nvim syntax/snippet material are MIT-licensed.
+The Unicode abbreviation data is Apache-2.0. See [NOTICE](NOTICE) for exact
+file provenance and [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for project
+credit.

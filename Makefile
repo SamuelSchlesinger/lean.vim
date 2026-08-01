@@ -1,7 +1,8 @@
-.PHONY: test test-live lint
+.PHONY: test test-live lint license-check
 
-test:
+test: license-check
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_plugin.vim
+	vim -Nu NONE -i NONE -n -es -V1 -S test/test_full_sync.vim
 
 test-live:
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_live.vim
@@ -17,3 +18,6 @@ lint:
 		-c 'source autoload/lean/editor.vim' \
 		-c 'source indent/lean.vim' \
 		-c 'qa!'
+
+license-check:
+	sh test/check_licenses.sh

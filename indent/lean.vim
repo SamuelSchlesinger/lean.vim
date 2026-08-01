@@ -1,5 +1,8 @@
 vim9script
 
+# Informed by lean.nvim's Lean indentation implementation.
+# SPDX-License-Identifier: MIT
+
 if exists('b:did_indent')
   finish
 endif

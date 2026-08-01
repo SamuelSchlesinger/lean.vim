@@ -14,6 +14,10 @@ Relevant upstream entry points:
 - [lean.nvim manual](https://github.com/Julian/lean.nvim/wiki/The-lean.nvim-Manual)
 - [Lean server protocol notes](https://github.com/leanprover/lean4/tree/master/src/Lean/Server)
 
+This review and port build directly on years of work by Julian Berman and the
+lean.nvim community. See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for fuller
+credit and [NOTICE](NOTICE) for exact file-level license provenance.
+
 ## What lean.nvim does
 
 lean.nvim is more than an LSP configuration. Its functionality divides into
@@ -46,7 +50,7 @@ same UI substrate or a built-in LSP client.
 | Project/root detection | Parent marker walk and `.lake/packages` handling | Implemented |
 | `lake serve` / `lean --server` | Vim job with raw channel transport | Implemented |
 | LSP framing and lifecycle | Native Content-Length JSON-RPC parser, request table, server requests | Implemented |
-| Open/change/save/close sync | Versioned full-document notifications with debounce | Implemented |
+| Open/change/save/close sync | Versioned incremental changes with leading/trailing burst debounce and full-sync fallback | Implemented |
 | Restart current file | `didClose` + `didOpen` with `dependencyBuildMode = once` | Implemented |
 | Diagnostics | Signs, underlines, silent-goal filtering, line popup | Implemented |
 | File progress | Lean progress notifications rendered as signs | Implemented |

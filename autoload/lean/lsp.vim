@@ -10,6 +10,7 @@ import autoload 'lean/util.vim' as util
 var servers: dict<any> = {}
 var buffer_roots: dict<string> = {}
 var change_timers: dict<any> = {}
+var last_change_flush_ms: dict<float> = {}
 var diagnostics_by_uri: dict<any> = {}
 var progress_by_uri: dict<any> = {}
 var signs_initialized = false
@@ -68,14 +69,50 @@ def ClearSemanticTokens(server: dict<any>, bufnr: number)
   endfor
 enddef
 
-def OnSemanticTokens(root: string, bufnr: number, version: number, result: any, error: any)
-  if type(error) == v:t_dict || !has_key(servers, root) || !bufloaded(bufnr)
+def AddPropertyBatches(bufnr: number, positions_by_type: dict<any>)
+  for [type_name, positions] in items(positions_by_type)
+    if empty(positions)
+      continue
+    endif
+    try
+      prop_add_list({type: type_name, bufnr: bufnr}, positions)
+    catch
+      # A single stale range must not prevent other valid positions in the
+      # same batch from rendering.
+      for position in positions
+        try
+          prop_add(position[0], position[1], {
+            type: type_name,
+            end_lnum: position[2],
+            end_col: position[3],
+            bufnr: bufnr,
+          })
+        catch
+        endtry
+      endfor
+    endtry
+  endfor
+enddef
+
+def OnSemanticTokens(root: string, bufnr: number, version: number,
+    generation: number, result: any, error: any)
+  if !has_key(servers, root) || !bufloaded(bufnr)
+    return
+  endif
+  var server = servers[root]
+  var buffer_key = string(bufnr)
+  if get(server.semantic_generations, buffer_key, -1) != generation
+    return
+  endif
+  if has_key(server.semantic_requests, buffer_key)
+    remove(server.semantic_requests, buffer_key)
+  endif
+  if type(error) == v:t_dict
     return
   endif
   if getbufvar(bufnr, 'lean_lsp_version', -1) != version
     return
   endif
-  var server = servers[root]
   ClearSemanticTokens(server, bufnr)
   if type(result) != v:t_dict
     return
@@ -86,6 +123,8 @@ def OnSemanticTokens(root: string, bufnr: number, version: number, result: any, 
   endif
   var line_index = 0
   var utf16_column = 0
+  var lines = getbufline(bufnr, 1, '$')
+  var positions_by_type: dict<any> = {}
   for index in range(0, len(data) - 5, 5)
     var delta_line = data[index]
     if delta_line > 0
@@ -99,21 +138,24 @@ def OnSemanticTokens(root: string, bufnr: number, version: number, result: any, 
     if type_index < 0 || type_index >= len(server.semantic_token_types)
       continue
     endif
-    var texts = getbufline(bufnr, line_index + 1)
-    if empty(texts)
+    if line_index < 0 || line_index >= len(lines)
       continue
     endif
-    var start_col = util.ByteColumn(texts[0], utf16_column)
-    var end_col = util.ByteColumn(texts[0], utf16_column + length)
-    try
-      prop_add(line_index + 1, start_col + 1, {
-        type: SemanticTypeName(server.semantic_token_types[type_index]),
-        length: max([1, end_col - start_col]),
-        bufnr: bufnr,
-      })
-    catch
-    endtry
+    var text = lines[line_index]
+    var start_col = util.ByteColumn(text, utf16_column)
+    var end_col = util.ByteColumn(text, utf16_column + length)
+    var type_name = SemanticTypeName(server.semantic_token_types[type_index])
+    if !has_key(positions_by_type, type_name)
+      positions_by_type[type_name] = []
+    endif
+    add(positions_by_type[type_name], [
+      line_index + 1,
+      start_col + 1,
+      line_index + 1,
+      start_col + 1 + max([1, end_col - start_col]),
+    ])
   endfor
+  AddPropertyBatches(bufnr, positions_by_type)
 enddef
 
 def RequestSemanticTokens(server: dict<any>, bufnr: number)
@@ -124,11 +166,18 @@ def RequestSemanticTokens(server: dict<any>, bufnr: number)
   if type(provider) != v:t_dict || empty(get(server, 'semantic_token_types', []))
     return
   endif
+  var key = string(bufnr)
+  if has_key(server.semantic_requests, key)
+    CancelRequest(server, server.semantic_requests[key])
+  endif
+  var generation = get(server.semantic_generations, key, 0) + 1
+  server.semantic_generations[key] = generation
   var version = getbufvar(bufnr, 'lean_lsp_version', 0)
   var root = server.root
-  RequestNow(server, 'textDocument/semanticTokens/full', {
+  var request_id = RequestNow(server, 'textDocument/semanticTokens/full', {
     textDocument: {uri: util.UriFromBuf(bufnr)},
-  }, (result, error) => OnSemanticTokens(root, bufnr, version, result, error))
+  }, (result, error) => OnSemanticTokens(root, bufnr, version, generation, result, error))
+  server.semantic_requests[key] = request_id
 enddef
 
 def RefreshSemanticTokens(server: dict<any>)
@@ -202,6 +251,14 @@ def NotifyServer(server: dict<any>, method: string, params: any)
   Send(server, {jsonrpc: '2.0', method: method, params: params})
 enddef
 
+def CancelRequest(server: dict<any>, id: number)
+  NotifyServer(server, '$/cancelRequest', {id: id})
+  var key = string(id)
+  if has_key(server.pending, key)
+    remove(server.pending, key)
+  endif
+enddef
+
 def RequestNow(server: dict<any>, method: string, params: any, callback: any): number
   var id = server.next_id
   server.next_id += 1
@@ -244,23 +301,35 @@ def InitParams(root: string): dict<any>
   }
 enddef
 
+def IncrementalSync(server: dict<any>): bool
+  var sync = get(server.capabilities, 'textDocumentSync', 0)
+  if type(sync) == v:t_number
+    return sync == 2
+  elseif type(sync) == v:t_dict
+    return get(sync, 'change', 0) == 2
+  endif
+  return false
+enddef
+
 def SendDidOpen(server: dict<any>, bufnr: number, dependency_mode: string = 'never')
   if !bufloaded(bufnr) || empty(bufname(bufnr))
     return
   endif
   var key = string(bufnr)
   var version = getbufvar(bufnr, 'lean_lsp_version', 0)
+  var text = util.BufText(bufnr)
   setbufvar(bufnr, 'lean_lsp_version', version)
   NotifyServer(server, 'textDocument/didOpen', {
     textDocument: {
       uri: util.UriFromBuf(bufnr),
       languageId: 'lean',
       version: version,
-      text: util.BufText(bufnr),
+      text: text,
     },
     dependencyBuildMode: dependency_mode,
   })
   server.opened[key] = true
+  server.synced_texts[key] = text
   setbufvar(bufnr, 'lean_lsp_attached', true)
   RequestSemanticTokens(server, bufnr)
 enddef
@@ -368,6 +437,8 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
   endif
 
   var sign_id = 1
+  var signs: list<any> = []
+  var positions_by_type: dict<any> = {}
   for diagnostic in diagnostics
     var tags = get(diagnostic, 'leanTags', [])
     var range = get(diagnostic, 'fullRange', get(diagnostic, 'range', {}))
@@ -375,14 +446,22 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
       continue
     endif
     if tags ==# [1]
-      sign_place(sign_id, 'lean-diagnostics', 'LeanGoalUnsolved', bufnr, {
+      add(signs, {
+        id: sign_id,
+        group: 'lean-diagnostics',
+        name: 'LeanGoalUnsolved',
+        buffer: bufnr,
         lnum: range.end.line + 1,
         priority: 11,
       })
       sign_id += 1
       continue
     elseif tags ==# [2]
-      sign_place(sign_id, 'lean-diagnostics', 'LeanGoalAccomplished', bufnr, {
+      add(signs, {
+        id: sign_id,
+        group: 'lean-diagnostics',
+        name: 'LeanGoalAccomplished',
+        buffer: bufnr,
         lnum: range.start.line + 1,
         priority: 11,
       })
@@ -393,7 +472,11 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
     endif
 
     var severity = DiagnosticSeverity(diagnostic)
-    sign_place(sign_id, 'lean-diagnostics', 'LeanDiagnostic' .. severity, bufnr, {
+    add(signs, {
+      id: sign_id,
+      group: 'lean-diagnostics',
+      name: 'LeanDiagnostic' .. severity,
+      buffer: bufnr,
       lnum: range.start.line + 1,
       priority: 15 - get(diagnostic, 'severity', 1),
     })
@@ -409,16 +492,19 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
       if end_line == start_line && end_col <= start_col
         end_col = start_col + 1
       endif
-      prop_add(start_line, start_col, {
-        type: 'LeanDiagnosticUnderline' .. severity,
-        end_lnum: end_line,
-        end_col: end_col,
-        bufnr: bufnr,
-      })
+      var type_name = 'LeanDiagnosticUnderline' .. severity
+      if !has_key(positions_by_type, type_name)
+        positions_by_type[type_name] = []
+      endif
+      add(positions_by_type[type_name], [start_line, start_col, end_line, end_col])
     catch
       # Ignore stale ranges after an edit; the server will republish them.
     endtry
   endfor
+  if !empty(signs)
+    sign_placelist(signs)
+  endif
+  AddPropertyBatches(bufnr, positions_by_type)
 enddef
 
 def RenderProgress(uri: string, processing: list<any>)
@@ -433,6 +519,7 @@ def RenderProgress(uri: string, processing: list<any>)
   endif
   var line_count = len(getbufline(bufnr, 1, '$'))
   var sign_id = 1
+  var signs: list<any> = []
   for info in processing
     var range = get(info, 'range', {})
     if empty(range)
@@ -444,13 +531,20 @@ def RenderProgress(uri: string, processing: list<any>)
       continue
     endif
     for line_index in range(first, last)
-      sign_place(sign_id, 'lean-progress', 'LeanProgress', bufnr, {
+      add(signs, {
+        id: sign_id,
+        group: 'lean-progress',
+        name: 'LeanProgress',
+        buffer: bufnr,
         lnum: line_index + 1,
         priority: 5,
       })
       sign_id += 1
     endfor
   endfor
+  if !empty(signs)
+    sign_placelist(signs)
+  endif
 enddef
 
 def HandleNotification(root: string, message: dict<any>)
@@ -586,6 +680,9 @@ def StartServer(root: string): dict<any>
     recv: '',
     buffers: {},
     opened: {},
+    synced_texts: {},
+    semantic_requests: {},
+    semantic_generations: {},
     capabilities: {},
     initialized: false,
     failed: false,
@@ -645,6 +742,12 @@ enddef
 
 export def Detach(bufnr: number)
   var key = string(bufnr)
+  if has_key(change_timers, key)
+    timer_stop(remove(change_timers, key))
+  endif
+  if has_key(last_change_flush_ms, key)
+    remove(last_change_flush_ms, key)
+  endif
   if !has_key(buffer_roots, key)
     return
   endif
@@ -656,6 +759,16 @@ export def Detach(bufnr: number)
   if has_key(server.opened, key)
     NotifyServer(server, 'textDocument/didClose', {textDocument: {uri: util.UriFromBuf(bufnr)}})
     remove(server.opened, key)
+  endif
+  if has_key(server.synced_texts, key)
+    remove(server.synced_texts, key)
+  endif
+  if has_key(server.semantic_requests, key)
+    CancelRequest(server, server.semantic_requests[key])
+    remove(server.semantic_requests, key)
+  endif
+  if has_key(server.semantic_generations, key)
+    remove(server.semantic_generations, key)
   endif
   if has_key(server.buffers, key)
     remove(server.buffers, key)
@@ -677,12 +790,22 @@ def FlushChange(bufnr: number)
     return
   endif
   var server = servers[root]
+  var current_text = util.BufText(bufnr)
+  var previous_text = get(server.synced_texts, key, v:null)
+  if type(previous_text) == v:t_string && previous_text ==# current_text
+    return
+  endif
   var version = getbufvar(bufnr, 'lean_lsp_version', 0) + 1
   setbufvar(bufnr, 'lean_lsp_version', version)
+  var content_changes = type(previous_text) == v:t_string && IncrementalSync(server)
+    ? [util.IncrementalChange(previous_text, current_text)]
+    : [{text: current_text}]
   NotifyServer(server, 'textDocument/didChange', {
     textDocument: {uri: util.UriFromBuf(bufnr), version: version},
-    contentChanges: [{text: util.BufText(bufnr)}],
+    contentChanges: content_changes,
   })
+  server.synced_texts[key] = current_text
+  last_change_flush_ms[key] = reltimefloat(reltime()) * 1000
   RequestSemanticTokens(server, bufnr)
 enddef
 
@@ -691,10 +814,17 @@ export def DidChange(bufnr: number)
   if !has_key(buffer_roots, key)
     return
   endif
+  var delay = max([0, config.Get().lsp.change_delay])
+  if !has_key(change_timers, key)
+      && reltimefloat(reltime()) * 1000
+        - get(last_change_flush_ms, key, -1.0) >= delay
+    FlushChange(bufnr)
+    return
+  endif
   if has_key(change_timers, key)
     timer_stop(change_timers[key])
   endif
-  change_timers[key] = timer_start(config.Get().lsp.change_delay,
+  change_timers[key] = timer_start(delay,
     (_) => FlushChange(bufnr))
 enddef
 
