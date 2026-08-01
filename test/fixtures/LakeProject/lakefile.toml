@@ -1,0 +1,6 @@
+name = "LeanVimFixture"
+version = "0.1.0"
+defaultTargets = ["LeanVimFixture"]
+
+[[lean_lib]]
+name = "LeanVimFixture"

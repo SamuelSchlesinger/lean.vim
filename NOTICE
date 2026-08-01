@@ -1,0 +1,16 @@
+This project is an independent Vim9 port inspired by Julian Berman's
+lean.nvim (https://github.com/Julian/lean.nvim).
+
+The following files are copied or adapted from lean.nvim at commit
+e05c0f821412337259b98cc732ff0cf6ac7afe0c under the MIT License:
+
+  data/lean/abbreviations.json
+  data/lean/snippets.json
+  snippets/lean.json
+  syntax/lean.vim
+
+The original lean.nvim copyright notice is:
+
+  Copyright (c) 2020 Julian Berman
+
+See LICENSE for the full MIT license text.

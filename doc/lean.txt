@@ -1,0 +1,143 @@
+*lean.txt*                 Lean 4 support for Vim9
+
+===============================================================================
+CONTENTS                                                     *lean-vim9*
+
+  1. Introduction.................................|lean-vim9-introduction|
+  2. Installation.................................|lean-vim9-installation|
+  3. Configuration...............................|lean-vim9-configuration|
+  4. Commands...........................................|lean-vim9-commands|
+  5. Mappings...........................................|lean-vim9-mappings|
+  6. Compatibility................................|lean-vim9-compatibility|
+
+===============================================================================
+1. Introduction                                      *lean-vim9-introduction*
+
+lean.vim is a Vim9-native Lean 4 environment modeled after lean.nvim.  It
+includes a Lean-specific LSP client, infoview, diagnostics, progress signs,
+semantic tokens, Unicode abbreviations, navigation, and code actions.
+
+===============================================================================
+2. Installation                                        *lean-vim9-installation*
+
+Requirements:
+
+  - Vim 9.1 with +vim9script +job +channel +popupwin +textprop +signs
+  - Lean 4 and, for Lake projects, lake on $PATH
+
+Place the plugin on 'runtimepath' and enable runtime files: >
+
+  filetype plugin indent on
+  syntax enable
+<
+===============================================================================
+3. Configuration                                      *lean-vim9-configuration*
+
+Set g:lean_config before the plugin loads.  All keys are optional. >
+
+  let g:lean_config = {
+        \ 'mappings': v:true,
+        \ 'abbreviations': {
+        \   'enable': v:true,
+        \   'leader': '\',
+        \   'extra': {},
+        \ },
+        \ 'infoview': {
+        \   'autoopen': v:true,
+        \   'orientation': 'auto',
+        \   'width': 50,
+        \   'height': 12,
+        \   'update_delay': 80,
+        \   'show_processing': v:true,
+        \   'show_no_info': v:false,
+        \ },
+        \ 'lsp': {
+        \   'enable': v:true,
+        \   'command': [],
+        \   'change_delay': 50,
+        \   'root_markers': ['lakefile.toml', 'lakefile.lean',
+        \                    'lean-toolchain', '.git'],
+        \   'stderr': v:true,
+        \ },
+        \ 'progress_bars': {'enable': v:true, 'character': '│'},
+        \ 'semantic_highlighting': {'enable': v:true},
+        \ 'signs': {'enable': v:true},
+        \ }
+<
+The lsp.command value is an argv List.  When empty, lake serve is selected for
+directories with a lakefile and lean --server for standalone files.
+
+===============================================================================
+4. Commands                                                *lean-vim9-commands*
+
+Goals and diagnostics:~
+
+  :LeanGoal                   Show the tactic goal at the cursor.
+  :LeanTermGoal               Show the term-mode expected type.
+  :LeanLineDiagnostics        Show diagnostics for the current line.
+  :LeanHover                  Show LSP hover information.
+
+Infoview:~
+
+  :LeanInfoviewOpen           Open the current tab's infoview.
+  :LeanInfoviewClose          Close it.
+  :LeanInfoviewToggle         Toggle it.
+  :LeanGotoInfoview           Move between source and infoview.
+  :LeanInfoviewAddPin         Save the current goal as a pin.
+  :LeanInfoviewClearPins      Remove all pins.
+  :LeanInfoviewPinTogglePause Pause or resume cursor-following updates.
+  :LeanInfoviewSetDiffPin     Save the current goal as diff baseline.
+  :LeanInfoviewClearDiffPin   Remove the diff baseline.
+  :LeanInfoviewToggleAutoDiffPin
+                              Compare each goal with the previous goal.
+
+Server and editor:~
+
+  :LeanRestartFile            Restart elaboration for the current file.
+  :LeanRefreshFileDependencies
+                              Alias for :LeanRestartFile.
+  :LeanRestartServer          Restart the project language server.
+  :LeanStatus                 Show connection information.
+  :LeanDefinition             Jump to definition.
+  :LeanDeclaration            Jump to declaration.
+  :LeanTypeDefinition         Jump to type definition.
+  :LeanReferences             Put references in the quickfix list.
+  :LeanRename                 Rename the symbol under the cursor.
+  :LeanCodeAction             Select a code action.
+  :LeanSorryFill              Insert enough sorry tactics for current goals.
+  :LeanModuleImports          List direct imports in quickfix.
+  :LeanModuleImportedBy       List direct importers in quickfix.
+  :LeanSearchPaths            Show Lean's project search paths.
+  :LeanAbbreviationsReverseLookup
+                              Show abbreviations for the current symbol.
+
+===============================================================================
+5. Mappings                                                *lean-vim9-mappings*
+
+Suggested mappings are disabled by default.  Set g:lean_config.mappings to
+v:true to enable them.  Their RHS values are <Plug> mappings.
+
+  <LocalLeader>i       <Plug>(LeanInfoviewToggle)
+  <LocalLeader>p       <Plug>(LeanInfoviewPinTogglePause)
+  <LocalLeader>x       <Plug>(LeanInfoviewAddPin)
+  <LocalLeader>c       <Plug>(LeanInfoviewClearPins)
+  <LocalLeader>dx      <Plug>(LeanInfoviewSetDiffPin)
+  <LocalLeader>dc      <Plug>(LeanInfoviewClearDiffPin)
+  <LocalLeader>dd      <Plug>(LeanInfoviewToggleAutoDiffPin)
+  <LocalLeader><Tab>   <Plug>(LeanGotoInfoview)
+  <LocalLeader>\       <Plug>(LeanAbbreviationsReverseLookup)
+  <LocalLeader>r       <Plug>(LeanRestartFile)
+  <LocalLeader>g       <Plug>(LeanGoal)
+  <LocalLeader>a       <Plug>(LeanCodeAction)
+  K                    <Plug>(LeanHover)
+
+===============================================================================
+6. Compatibility                                      *lean-vim9-compatibility*
+
+The Vim9 infoview uses $/lean/plainGoal and $/lean/plainTermGoal.  It does not
+render ProofWidgets, clickable expression references, terminal images, SVGs,
+or nested widget tooltips.  Widget enable/disable commands remain defined and
+explain this limitation.  See FUNCTIONALITY.md in the repository for a full
+parity table.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
