@@ -43,7 +43,15 @@ assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'lake serve did not initialize for the Lake fixture')
 assert_equal('lake', lean#LspStatus().command[0])
 assert_equal(root .. '/test/fixtures/LakeProject', lean#LspStatus().root)
+var cwd_before_search = getcwd()
+g:lean_test_dir_changes = 0
+augroup lean_test_directory_events
+  autocmd!
+  autocmd DirChanged * g:lean_test_dir_changes += 1
+augroup END
 assert_false(empty(lean#CurrentSearchPaths()))
+assert_equal(cwd_before_search, getcwd(), 'search-path lookup changed Vim working directory')
+assert_equal(0, g:lean_test_dir_changes, 'search-path lookup fired DirChanged')
 
 lean#Stop()
 if !empty(v:errors)

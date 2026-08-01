@@ -52,7 +52,10 @@ command! LeanModuleImportedBy call lean#ModuleImportedBy()
 augroup lean_vim9
   autocmd!
   autocmd FileType lean call lean#Attach(bufnr())
+  autocmd BufWinEnter,WinEnter * call lean#OnBufWinEnter(bufnr())
+  autocmd TabEnter * call lean#OnBufWinEnter(bufnr())
   autocmd CmdwinEnter * call lean#SetupCommandWindow()
   autocmd User LeanDiagnosticsUpdate,LeanProgressUpdate call lean#OnServerUpdate()
+  autocmd TabClosed * call lean#OnTabClosed()
   autocmd VimLeavePre * call lean#Stop()
 augroup END

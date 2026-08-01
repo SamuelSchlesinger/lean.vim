@@ -95,7 +95,7 @@ endfor
 assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)), 'LSP did not initialize')
 assert_equal('lean', &filetype)
 assert_equal('-- %s', &commentstring)
-assert_equal('LeanVim9Indent(v:lnum)', &indentexpr)
+assert_equal('g:LeanVim9Indent(v:lnum)', &indentexpr)
 assert_equal(2, exists(':LeanGoal'))
 assert_false(empty(maparg('<Plug>(LeanInfoviewToggle)', 'n')))
 assert_false(empty(maparg('K', 'n')))
@@ -105,8 +105,23 @@ assert_equal('αx', lean#abbreviations#ConvertText("\\alphax"))
 assert_equal('custom!', lean#abbreviations#ConvertText("\\λx!"))
 assert_equal("\\", lean#abbreviations#ConvertText("\\"))
 assert_equal(5, lean#util#ByteColumn('a😊b', 3))
+var uri_path = root .. '/test/fixtures/a b#c.lean'
+assert_equal(fnamemodify(uri_path, ':p'),
+  lean#util#PathFromUri(lean#util#UriFromPath(uri_path)),
+  'file URI encoding did not round-trip reserved characters')
+assert_equal('/tmp/a b', lean#util#PathFromUri('file://localhost/tmp/a%20b'),
+  'localhost file URI authority was treated as part of the path')
 assert_equal(root .. '/test/fixtures/LakeProject',
   lean#lsp#ProjectRoot(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean'))
+assert_equal(root .. '/test/fixtures/LakeProject',
+  lean#lsp#ProjectRoot(root .. '/test/fixtures/LakeProject/.lake/packages/dep/Dep.lean'),
+  'a Lake dependency was given its own language-server root')
+assert_equal('/opt/lean/lib/lean',
+  lean#lsp#ProjectRoot('/opt/lean/lib/lean/Init/Prelude.lean'),
+  'installed Lean library was split into per-directory roots')
+assert_equal('/opt/lean/lean/library',
+  lean#lsp#ProjectRoot('/opt/lean/lean/library/Init/Prelude.lean'),
+  'Lean source library root was not detected')
 
 assert_true(WaitFor(() => !empty(sign_getplaced(bufnr(), {group: 'lean-diagnostics'})[0].signs)),
   'diagnostic sign was not placed')
@@ -123,6 +138,22 @@ assert_true(WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat'
   'auto-opened infoview goal did not render: ' .. string(lean#InfoviewState()))
 var state = lean#InfoviewState()
 assert_equal(['Nat'], state.term_goal)
+
+# Showing an already-loaded Lean buffer in a new tab does not fire FileType;
+# BufWinEnter must still create that tab's independent auto-opened infoview.
+var original_infoview_bufnr = state.bufnr
+tab split
+assert_true(WaitFor(() => !empty(lean#InfoviewState())
+  && lean#InfoviewState().bufnr != original_infoview_bufnr),
+  'auto-open did not create an infoview for an existing buffer in a new tab')
+var second_tab_infoview_bufnr = lean#InfoviewState().bufnr
+tabclose
+sleep 20m
+assert_equal(original_infoview_bufnr, lean#InfoviewState().bufnr,
+  'closing the duplicate-buffer tab changed the original infoview')
+assert_false(bufexists(second_tab_infoview_bufnr),
+  'duplicate-buffer tab leaked its infoview buffer')
+state = lean#InfoviewState()
 
 lean#InfoviewClose()
 assert_true(empty(win_findbuf(state.bufnr)), 'infoview window did not close')
@@ -158,10 +189,15 @@ assert_equal(version_before_change + 1, getbufvar(source, 'lean_lsp_version', 0)
   'a document edit burst was not debounced')
 assert_true(WaitFor(() => getbufvar(source, 'lean_lsp_version', 0)
   == version_before_change + 2), 'the trailing document edit was not flushed')
+sleep 30m
+assert_true(indexof(lean#lsp#DiagnosticsAt(source, 0), (_, diagnostic) =>
+  get(diagnostic, 'message', '') ==# 'stale warning') < 0,
+  'a stale versioned diagnostic replaced current diagnostics')
 lean#RestartFile()
 sleep 100m
 
 var uri = lean#util#UriFromBuf(source)
+var version_before_workspace_edit = getbufvar(source, 'lean_lsp_version', 0)
 assert_true(lean#lsp#ApplyWorkspaceEdit({changes: {
   [uri]: [{
     range: {
@@ -172,6 +208,33 @@ assert_true(lean#lsp#ApplyWorkspaceEdit({changes: {
   }],
 }}))
 assert_equal('  exact 42', getbufline(source, 2)[0])
+assert_equal(version_before_workspace_edit + 1,
+  getbufvar(source, 'lean_lsp_version', 0),
+  'workspace edit was not synchronized before a following command could run')
+
+var version_for_edit = getbufvar(source, 'lean_lsp_version', 0)
+assert_false(lean#lsp#ApplyWorkspaceEdit({documentChanges: [{
+  textDocument: {uri: uri, version: version_for_edit - 1},
+  edits: [{
+    range: {
+      start: {line: 1, character: 8},
+      end: {line: 1, character: 10},
+    },
+    newText: '99',
+  }],
+}]}), 'a stale versioned workspace edit was accepted')
+assert_equal('  exact 42', getbufline(source, 2)[0], 'a stale workspace edit changed the buffer')
+
+# Restarting replaces the server object before the old process necessarily
+# reports its exit. The old callback must not mark the new server as dead.
+lean#RestartServer()
+assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+  'restarted LSP did not initialize')
+sleep 100m
+assert_true(get(lean#LspStatus(), 'running', false),
+  'the old server exit callback stopped the replacement server')
+assert_true(WaitFor(() => !empty(sign_getplaced(source, {group: 'lean-diagnostics'})[0].signs)),
+  'diagnostics did not return after restart')
 
 setbufline(source, 5, '')
 cursor(5, 1)
@@ -191,11 +254,48 @@ feedkeys("i\\\\ \<Esc>", 'xt')
 sleep 50m
 assert_equal("\\ ", getbufline(source, 7)[0], 'escaped abbreviation leader did not collapse')
 
+# Renaming a live buffer must close the old document URI before opening the
+# new one, even when both names have the same project root.
+var original_uri = lean#util#UriFromBuf(source)
+execute 'file ' .. fnameescape(root .. '/test/fixtures/RenamedBuffer.lean')
+var renamed_uri = lean#util#UriFromBuf(source)
+assert_notequal(original_uri, renamed_uri)
+assert_equal(renamed_uri, getbufvar(source, 'lean_lsp_uri', ''),
+  'BufFilePost did not transfer LSP ownership to the new URI')
+assert_true(WaitFor(() => index(mapnew(prop_list(1, {bufnr: source}),
+  (_, property) => property.type), 'LeanSemantic_keyword') >= 0),
+  'semantic tokens did not return for the renamed document')
+
+# Detach owns every decoration and cache associated with the document.
+assert_true(index(mapnew(prop_list(1, {bufnr: source}),
+  (_, property) => property.type), 'LeanSemantic_keyword') >= 0,
+  'semantic tokens were unexpectedly absent before detach')
+lean#lsp#Detach(source)
+sleep 30m
+assert_true(empty(sign_getplaced(source, {group: 'lean-diagnostics'})[0].signs),
+  'diagnostic signs survived detach')
+assert_true(empty(sign_getplaced(source, {group: 'lean-progress'})[0].signs),
+  'progress signs survived detach')
+assert_true(index(mapnew(prop_list(1, {bufnr: source}),
+  (_, property) => property.type), 'LeanSemantic_keyword') < 0,
+  'semantic tokens survived detach')
+assert_true(empty(lean#lsp#DiagnosticsAt(source, 1)), 'diagnostic cache survived detach')
+assert_false(lean#lsp#ProgressAt(source, 2), 'progress cache survived detach')
+
 lean#Stop()
 sleep 50m
 
 var messages = mapnew(filereadable(rpc_log) ? readfile(rpc_log) : [], (_, line) => json_decode(line))
 assert_true(indexof(messages, (_, message) => get(message, 'method', '') ==# 'initialize') >= 0)
+var initialize_messages = filter(copy(messages), (_, message) =>
+  get(message, 'method', '') ==# 'initialize')
+assert_equal('undo', initialize_messages[0].params.capabilities.workspace.workspaceEdit.failureHandling,
+  'workspace-edit failure handling overclaimed transactional support')
+assert_equal(['edit', 'command'],
+  initialize_messages[0].params.capabilities.textDocument.codeAction.resolveSupport.properties,
+  'lazy code-action properties were not advertised')
+assert_equal(2, len(filter(copy(messages), (_, message) =>
+  get(message, 'method', '') ==# 'initialize')), 'restart did not create exactly one replacement server')
 assert_true(indexof(messages, (_, message) => get(message, 'method', '') ==# 'textDocument/didChange') >= 0)
 var did_changes = filter(copy(messages), (_, message) =>
   get(message, 'method', '') ==# 'textDocument/didChange')
@@ -214,9 +314,32 @@ assert_true(indexof(did_changes, (_, message) =>
   'an intermediate edit in the debounced burst was sent')
 assert_true(indexof(messages, (_, message) => get(message, 'id', -1) == 900
   && get(message, 'result', []) ==# [v:null]) >= 0)
+assert_true(indexof(messages, (_, message) => get(message, 'id', -1) == 901
+  && get(get(message, 'error', {}), 'code', 0) == -32601) >= 0,
+  'unsupported dynamic registration was incorrectly reported as successful')
 assert_true(indexof(messages, (_, message) =>
   get(message, 'method', '') ==# 'textDocument/didOpen'
     && get(get(message, 'params', {}), 'dependencyBuildMode', '') ==# 'once') >= 0)
+assert_equal(3, len(filter(copy(messages), (_, message) =>
+  get(message, 'method', '') ==# 'textDocument/didClose')),
+  'restart-file, buffer rename, and detach did not each send exactly one didClose')
+assert_true(indexof(messages, (_, message) =>
+  get(message, 'method', '') ==# 'textDocument/didClose'
+    && get(message.params.textDocument, 'uri', '') ==# original_uri) >= 0,
+  'buffer rename did not close the original URI')
+assert_true(indexof(messages, (_, message) =>
+  get(message, 'method', '') ==# 'textDocument/didOpen'
+    && get(message.params.textDocument, 'uri', '') ==# renamed_uri) >= 0,
+  'buffer rename did not open the replacement URI')
+assert_true(indexof(messages, (_, message) =>
+  get(message, 'method', '') ==# '$/cancelRequest') >= 0,
+  'superseded infoview requests were not cancelled')
+assert_equal(2, len(filter(copy(messages), (_, message) =>
+  get(message, 'method', '') ==# 'shutdown')),
+  'restart and final stop did not gracefully shut down both servers')
+assert_equal(2, len(filter(copy(messages), (_, message) =>
+  get(message, 'method', '') ==# 'exit')),
+  'restart and final stop did not send exit to both servers')
 
 if !empty(v:errors)
   for error in v:errors
@@ -224,4 +347,5 @@ if !empty(v:errors)
   endfor
   cquit
 endif
+delete(rpc_log)
 qa!

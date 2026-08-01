@@ -15,6 +15,48 @@ var diagnostics_by_uri: dict<any> = {}
 var progress_by_uri: dict<any> = {}
 var signs_initialized = false
 var stderr_history: list<string> = []
+var next_request_id = 1
+
+def AddHistory(message: string)
+  if empty(message)
+    return
+  endif
+  add(stderr_history, message)
+  if len(stderr_history) > 200
+    remove(stderr_history, 0, len(stderr_history) - 201)
+  endif
+enddef
+
+def IsCurrentServer(server: dict<any>): bool
+  var root = get(server, 'root', '')
+  return !empty(root) && has_key(servers, root) && servers[root] is server
+enddef
+
+def FailRequests(server: dict<any>, message: string)
+  var error = {code: -32097, message: message}
+  var pending = values(copy(server.pending))
+  server.pending = {}
+  var queued = server.queue
+  server.queue = []
+  for callback in pending
+    if type(callback) == v:t_func
+      try
+        call(callback, [v:null, error])
+      catch
+        AddHistory($'request failure callback raised: {v:exception}')
+      endtry
+    endif
+  endfor
+  for request in queued
+    if type(get(request, 'callback', v:null)) == v:t_func
+      try
+        call(request.callback, [v:null, error])
+      catch
+        AddHistory($'queued request failure callback raised: {v:exception}')
+      endtry
+    endif
+  endfor
+enddef
 
 def SemanticHighlight(token_type: string): string
   if index(['namespace', 'type', 'class', 'enum', 'interface', 'struct', 'typeParameter'], token_type) >= 0
@@ -50,7 +92,10 @@ enddef
 def EnsureSemanticTypes(server: dict<any>)
   var provider = get(server.capabilities, 'semanticTokensProvider', {})
   var legend = type(provider) == v:t_dict ? get(provider, 'legend', {}) : {}
-  server.semantic_token_types = get(legend, 'tokenTypes', [])
+  var token_types = type(legend) == v:t_dict ? get(legend, 'tokenTypes', []) : []
+  server.semantic_token_types = type(token_types) == v:t_list
+    ? filter(copy(token_types), (_, token_type) => type(token_type) == v:t_string)
+    : []
   for token_type in server.semantic_token_types
     var name = SemanticTypeName(token_type)
     execute $'highlight default link {name} {SemanticHighlight(token_type)}'
@@ -94,12 +139,11 @@ def AddPropertyBatches(bufnr: number, positions_by_type: dict<any>)
   endfor
 enddef
 
-def OnSemanticTokens(root: string, bufnr: number, version: number,
+def OnSemanticTokens(server: dict<any>, bufnr: number, version: number,
     generation: number, result: any, error: any)
-  if !has_key(servers, root) || !bufloaded(bufnr)
+  if !IsCurrentServer(server) || !bufloaded(bufnr)
     return
   endif
-  var server = servers[root]
   var buffer_key = string(bufnr)
   if get(server.semantic_generations, buffer_key, -1) != generation
     return
@@ -113,12 +157,23 @@ def OnSemanticTokens(root: string, bufnr: number, version: number,
   if getbufvar(bufnr, 'lean_lsp_version', -1) != version
     return
   endif
-  ClearSemanticTokens(server, bufnr)
   if type(result) != v:t_dict
+    ClearSemanticTokens(server, bufnr)
     return
   endif
   var data = get(result, 'data', [])
-  if type(data) != v:t_list || len(data) < 5
+  if type(data) != v:t_list || len(data) % 5 != 0
+    ClearSemanticTokens(server, bufnr)
+    return
+  endif
+  for value in data
+    if type(value) != v:t_number || value < 0
+      ClearSemanticTokens(server, bufnr)
+      return
+    endif
+  endfor
+  ClearSemanticTokens(server, bufnr)
+  if empty(data)
     return
   endif
   var line_index = 0
@@ -144,6 +199,11 @@ def OnSemanticTokens(root: string, bufnr: number, version: number,
     var text = lines[line_index]
     var start_col = util.ByteColumn(text, utf16_column)
     var end_col = util.ByteColumn(text, utf16_column + length)
+    if length == 0
+        || utf16idx(text, start_col) != utf16_column
+        || utf16idx(text, end_col) != utf16_column + length
+      continue
+    endif
     var type_name = SemanticTypeName(server.semantic_token_types[type_index])
     if !has_key(positions_by_type, type_name)
       positions_by_type[type_name] = []
@@ -166,6 +226,12 @@ def RequestSemanticTokens(server: dict<any>, bufnr: number)
   if type(provider) != v:t_dict || empty(get(server, 'semantic_token_types', []))
     return
   endif
+  var full = get(provider, 'full', false)
+  if type(full) != v:t_bool && type(full) != v:t_dict
+    return
+  elseif type(full) == v:t_bool && !full
+    return
+  endif
   var key = string(bufnr)
   if has_key(server.semantic_requests, key)
     CancelRequest(server, server.semantic_requests[key])
@@ -173,10 +239,9 @@ def RequestSemanticTokens(server: dict<any>, bufnr: number)
   var generation = get(server.semantic_generations, key, 0) + 1
   server.semantic_generations[key] = generation
   var version = getbufvar(bufnr, 'lean_lsp_version', 0)
-  var root = server.root
   var request_id = RequestNow(server, 'textDocument/semanticTokens/full', {
     textDocument: {uri: util.UriFromBuf(bufnr)},
-  }, (result, error) => OnSemanticTokens(root, bufnr, version, generation, result, error))
+  }, (result, error) => OnSemanticTokens(server, bufnr, version, generation, result, error))
   server.semantic_requests[key] = request_id
 enddef
 
@@ -186,25 +251,53 @@ def RefreshSemanticTokens(server: dict<any>)
   endfor
 enddef
 
-def RootMarker(dir: string): bool
-  for marker in config.Get().lsp.root_markers
-    if filereadable(dir .. '/' .. marker) || isdirectory(dir .. '/' .. marker)
-      return true
-    endif
-  endfor
-  return false
+def IsCoreLeanDirectory(dir: string): bool
+  var source_tree = filereadable(dir .. '/Init.lean')
+    && filereadable(dir .. '/Lean.lean')
+    && isdirectory(dir .. '/kernel')
+    && isdirectory(dir .. '/runtime')
+  var repository_root = filereadable(dir .. '/LICENSE')
+    && isdirectory(dir .. '/LICENSES')
+    && isdirectory(dir .. '/src')
+  return source_tree || repository_root
 enddef
 
 export def ProjectRoot(path: string): string
   var absolute = fnamemodify(path, ':p')
-  var packages = matchstr(absolute, '^.\{-}\ze/.lake/packages/')
+  var normalized = substitute(absolute, '\\', '/', 'g')
+  var packages = matchstr(normalized, '^.\{-}\ze/.lake/packages/')
   if !empty(packages)
     return packages
   endif
 
   var dir = fnamemodify(absolute, ':h')
+  var git_marker_enabled = false
   while !empty(dir)
-    if RootMarker(dir)
+    for marker in config.Get().lsp.root_markers
+      if marker ==# '.git'
+        git_marker_enabled = true
+      elseif filereadable(dir .. '/' .. marker) || isdirectory(dir .. '/' .. marker)
+        return dir
+      endif
+    endfor
+    var parent = fnamemodify(dir, ':h')
+    if parent ==# dir
+      break
+    endif
+    dir = parent
+  endwhile
+
+  # lean.nvim treats both the Lean source tree and an installed toolchain's
+  # library as one workspace. Without these boundaries, standalone library
+  # files would start a separate server in every subdirectory.
+  var stdlib = matchstr(normalized, '^.\{-}\%(\/lean\/library\|\/lib\/lean\)\ze\%(/\|$\)')
+  if !empty(stdlib)
+    return stdlib
+  endif
+
+  dir = fnamemodify(absolute, ':h')
+  while !empty(dir)
+    if IsCoreLeanDirectory(dir)
       return dir
     endif
     var parent = fnamemodify(dir, ':h')
@@ -213,6 +306,20 @@ export def ProjectRoot(path: string): string
     endif
     dir = parent
   endwhile
+
+  if git_marker_enabled
+    dir = fnamemodify(absolute, ':h')
+    while !empty(dir)
+      if isdirectory(dir .. '/.git') || filereadable(dir .. '/.git')
+        return dir
+      endif
+      var parent = fnamemodify(dir, ':h')
+      if parent ==# dir
+        break
+      endif
+      dir = parent
+    endwhile
+  endif
   return fnamemodify(absolute, ':h')
 enddef
 
@@ -252,21 +359,35 @@ def NotifyServer(server: dict<any>, method: string, params: any)
 enddef
 
 def CancelRequest(server: dict<any>, id: number)
-  NotifyServer(server, '$/cancelRequest', {id: id})
+  if id <= 0
+    return
+  endif
   var key = string(id)
   if has_key(server.pending, key)
+    NotifyServer(server, '$/cancelRequest', {id: id})
     remove(server.pending, key)
+    return
+  endif
+  var queued_index = indexof(server.queue,
+    (_, request) => get(request, 'id', -1) == id)
+  if queued_index >= 0
+    remove(server.queue, queued_index)
   endif
 enddef
 
-def RequestNow(server: dict<any>, method: string, params: any, callback: any): number
-  var id = server.next_id
-  server.next_id += 1
+def SendRequest(server: dict<any>, id: number, method: string, params: any,
+    callback: any): number
   if type(callback) == v:t_func
     server.pending[string(id)] = callback
   endif
   Send(server, {jsonrpc: '2.0', id: id, method: method, params: params})
   return id
+enddef
+
+def RequestNow(server: dict<any>, method: string, params: any, callback: any): number
+  var id = next_request_id
+  next_request_id += 1
+  return SendRequest(server, id, method, params, callback)
 enddef
 
 def InitParams(root: string): dict<any>
@@ -283,15 +404,56 @@ def InitParams(root: string): dict<any>
         applyEdit: true,
         configuration: true,
         workspaceFolders: true,
-        workspaceEdit: {documentChanges: true},
+        workspaceEdit: {
+          documentChanges: true,
+          # Every edit is preflighted and unexpected commit failures are
+          # rolled back. LSP's `undo` value accurately allows rollback itself
+          # to fail, unlike the stronger transactional capability.
+          failureHandling: 'undo',
+        },
       },
       textDocument: {
         synchronization: {didSave: true, dynamicRegistration: false},
         hover: {contentFormat: ['markdown', 'plaintext']},
         definition: {linkSupport: true},
         declaration: {linkSupport: true},
-        codeAction: {dataSupport: true},
-        publishDiagnostics: {relatedInformation: true, tagSupport: {valueSet: [1, 2]}},
+        codeAction: {
+          dynamicRegistration: false,
+          codeActionLiteralSupport: {codeActionKind: {valueSet: [
+            '', 'quickfix', 'refactor', 'refactor.extract',
+            'refactor.inline', 'refactor.rewrite', 'source',
+            'source.organizeImports', 'source.fixAll',
+          ]}},
+          isPreferredSupport: true,
+          disabledSupport: true,
+          dataSupport: true,
+          resolveSupport: {properties: ['edit', 'command']},
+        },
+        publishDiagnostics: {
+          relatedInformation: true,
+          versionSupport: true,
+          tagSupport: {valueSet: [1, 2]},
+        },
+        semanticTokens: {
+          dynamicRegistration: false,
+          requests: {range: false, full: true},
+          tokenTypes: [
+            'namespace', 'type', 'class', 'enum', 'interface', 'struct',
+            'typeParameter', 'parameter', 'variable', 'property', 'enumMember',
+            'event', 'function', 'method', 'macro', 'keyword', 'modifier',
+            'comment', 'string', 'number', 'regexp', 'operator', 'decorator',
+          ],
+          tokenModifiers: [
+            'declaration', 'definition', 'readonly', 'static', 'deprecated',
+            'abstract', 'async', 'modification', 'documentation',
+            'defaultLibrary',
+          ],
+          formats: ['relative'],
+          overlappingTokenSupport: false,
+          multilineTokenSupport: false,
+          serverCancelSupport: true,
+          augmentsSyntaxTokens: true,
+        },
       },
       general: {positionEncodings: ['utf-16']},
       lean: {silentDiagnosticSupport: true, rpcWireFormat: 'v1'},
@@ -301,12 +463,28 @@ def InitParams(root: string): dict<any>
   }
 enddef
 
-def IncrementalSync(server: dict<any>): bool
+def SyncKind(server: dict<any>): number
   var sync = get(server.capabilities, 'textDocumentSync', 0)
   if type(sync) == v:t_number
-    return sync == 2
+    return sync
   elseif type(sync) == v:t_dict
-    return get(sync, 'change', 0) == 2
+    var change = get(sync, 'change', 0)
+    return type(change) == v:t_number ? change : 0
+  endif
+  return 0
+enddef
+
+def IncrementalSync(server: dict<any>): bool
+  return SyncKind(server) == 2
+enddef
+
+def SupportsOpenClose(server: dict<any>): bool
+  var sync = get(server.capabilities, 'textDocumentSync', 0)
+  if type(sync) == v:t_number
+    return sync > 0
+  elseif type(sync) == v:t_dict
+    var open_close = get(sync, 'openClose', false)
+    return type(open_close) == v:t_bool && open_close
   endif
   return false
 enddef
@@ -319,33 +497,58 @@ def SendDidOpen(server: dict<any>, bufnr: number, dependency_mode: string = 'nev
   var version = getbufvar(bufnr, 'lean_lsp_version', 0)
   var text = util.BufText(bufnr)
   setbufvar(bufnr, 'lean_lsp_version', version)
-  NotifyServer(server, 'textDocument/didOpen', {
-    textDocument: {
-      uri: util.UriFromBuf(bufnr),
-      languageId: 'lean',
-      version: version,
-      text: text,
-    },
-    dependencyBuildMode: dependency_mode,
-  })
-  server.opened[key] = true
+  var uri = util.UriFromBuf(bufnr)
+  if SupportsOpenClose(server)
+    NotifyServer(server, 'textDocument/didOpen', {
+      textDocument: {
+        uri: uri,
+        languageId: 'lean',
+        version: version,
+        text: text,
+      },
+      dependencyBuildMode: dependency_mode,
+    })
+  endif
+  # Track ownership even for a server which opts out of open/close messages;
+  # otherwise every WinEnter would repeat setup and semantic-token requests.
+  server.opened[key] = uri
   server.synced_texts[key] = text
   setbufvar(bufnr, 'lean_lsp_attached', true)
+  setbufvar(bufnr, 'lean_lsp_uri', uri)
   RequestSemanticTokens(server, bufnr)
 enddef
 
-def OnInitialized(root: string, result: any, error: any)
-  if !has_key(servers, root)
+def OnInitialized(server: dict<any>, result: any, error: any)
+  if !IsCurrentServer(server)
     return
   endif
-  var server = servers[root]
   if type(error) == v:t_dict
     server.failed = true
+    FailRequests(server,
+      $'Lean language server initialization failed: {get(error, "message", string(error))}')
     util.Notify($'language server initialization failed: {get(error, "message", string(error))}', 'ErrorMsg')
+    server.stopping = true
+    if has_key(server, 'job') && job_status(server.job) ==# 'run'
+      job_stop(server.job)
+    endif
     return
   endif
   server.initialized = true
-  server.capabilities = type(result) == v:t_dict ? get(result, 'capabilities', {}) : {}
+  var capabilities = type(result) == v:t_dict ? get(result, 'capabilities', {}) : {}
+  server.capabilities = type(capabilities) == v:t_dict ? capabilities : {}
+  var position_encoding = get(server.capabilities, 'positionEncoding', 'utf-16')
+  if type(position_encoding) != v:t_string || position_encoding !=# 'utf-16'
+    server.initialized = false
+    server.failed = true
+    var message = $'Lean language server selected unsupported position encoding {string(position_encoding)}'
+    FailRequests(server, message)
+    util.Notify(message, 'ErrorMsg')
+    server.stopping = true
+    if has_key(server, 'job') && job_status(server.job) ==# 'run'
+      job_stop(server.job)
+    endif
+    return
+  endif
   EnsureSemanticTypes(server)
   NotifyServer(server, 'initialized', {})
   for key in keys(server.buffers)
@@ -354,31 +557,51 @@ def OnInitialized(root: string, result: any, error: any)
   var queued = server.queue
   server.queue = []
   for request in queued
-    RequestNow(server, request.method, request.params, request.callback)
+    SendRequest(server, request.id, request.method, request.params, request.callback)
   endfor
 enddef
 
-def OnStderr(root: string, _channel: channel, message: string)
-  if empty(message)
+def OnStderr(server: dict<any>, _channel: channel, message: string)
+  if (!IsCurrentServer(server) && !server.stopping) || empty(message)
     return
   endif
-  add(stderr_history, message)
-  if len(stderr_history) > 200
-    remove(stderr_history, 0)
-  endif
+  AddHistory(message)
   if config.Get().lsp.stderr && message !~# '^warning: failed to query latest release'
     echomsg $'[lean server] {message}'
   endif
 enddef
 
-def OnExit(root: string, _job: job, status: number)
-  if !has_key(servers, root)
+def OnExit(server: dict<any>, _job: job, status: number)
+  var current = IsCurrentServer(server)
+  if !current && !server.stopping
     return
   endif
-  var server = servers[root]
   server.running = false
+  server.initialized = false
+  if get(server, 'stop_timer', -1) >= 0
+    timer_stop(server.stop_timer)
+    server.stop_timer = -1
+  endif
+  if server.stopping
+    server.pending = {}
+    server.queue = []
+    return
+  endif
+  for key in keys(server.buffers)
+    var bufnr = str2nr(key)
+    ClearBufferDecorations(server, bufnr, true)
+    if bufexists(bufnr)
+      setbufvar(bufnr, 'lean_lsp_attached', false)
+    endif
+  endfor
   if !server.stopping
+    FailRequests(server, $'Lean language server exited with status {status}')
     util.Notify($'language server exited with status {status}', status == 0 ? 'WarningMsg' : 'ErrorMsg')
+    silent doautocmd <nomodeline> User LeanDiagnosticsUpdate
+    silent doautocmd <nomodeline> User LeanProgressUpdate
+  else
+    server.pending = {}
+    server.queue = []
   endif
 enddef
 
@@ -410,7 +633,40 @@ def EnsureSigns()
 enddef
 
 def DiagnosticSeverity(diag: dict<any>): string
-  return get({1: 'Error', 2: 'Warning', 3: 'Information', 4: 'Hint'}, get(diag, 'severity', 1), 'Error')
+  var severity = get(diag, 'severity', 1)
+  return type(severity) == v:t_number
+    ? get({1: 'Error', 2: 'Warning', 3: 'Information', 4: 'Hint'}, severity, 'Error')
+    : 'Error'
+enddef
+
+def DiagnosticSeverityNumber(diag: dict<any>): number
+  var severity = get(diag, 'severity', 1)
+  return type(severity) == v:t_number && severity >= 1 && severity <= 4
+    ? severity
+    : 1
+enddef
+
+def ValidRange(range: any, line_count: number): bool
+  if type(range) != v:t_dict
+      || type(get(range, 'start', v:null)) != v:t_dict
+      || type(get(range, 'end', v:null)) != v:t_dict
+  return false
+  endif
+  var values = [
+    get(range.start, 'line', v:null),
+    get(range.start, 'character', v:null),
+    get(range.end, 'line', v:null),
+    get(range.end, 'character', v:null),
+  ]
+  if indexof(values, (_, value) => type(value) != v:t_number || value < 0) >= 0
+    return false
+  endif
+  return range.start.line < line_count
+    && range.end.line >= range.start.line
+    && range.end.line <= line_count
+    && (range.end.line < line_count || range.end.character == 0)
+    && (range.end.line != range.start.line
+      || range.end.character >= range.start.character)
 enddef
 
 def ClearDiagnosticProperties(bufnr: number)
@@ -423,6 +679,40 @@ def ClearDiagnosticProperties(bufnr: number)
   endfor
 enddef
 
+def ClearUriState(uri: string)
+  if empty(uri)
+    return
+  endif
+  if has_key(diagnostics_by_uri, uri)
+    remove(diagnostics_by_uri, uri)
+  endif
+  if has_key(progress_by_uri, uri)
+    remove(progress_by_uri, uri)
+  endif
+enddef
+
+def ClearBufferDecorations(server: dict<any>, bufnr: number, clear_state: bool = false)
+  if !bufexists(bufnr)
+    return
+  endif
+  sign_unplace('lean-diagnostics', {buffer: bufnr})
+  sign_unplace('lean-progress', {buffer: bufnr})
+  ClearDiagnosticProperties(bufnr)
+  ClearSemanticTokens(server, bufnr)
+  if clear_state && !empty(bufname(bufnr))
+    ClearUriState(util.UriFromBuf(bufnr))
+  endif
+enddef
+
+def NotificationIsStale(uri: string, version: any): bool
+  if type(version) != v:t_number
+    return false
+  endif
+  var bufnr = bufnr(util.PathFromUri(uri))
+  return bufnr >= 0 && bufloaded(bufnr)
+    && version < getbufvar(bufnr, 'lean_lsp_version', 0)
+enddef
+
 def RenderDiagnostics(uri: string, diagnostics: list<any>)
   EnsureSigns()
   var path = util.PathFromUri(uri)
@@ -432,63 +722,75 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
   endif
   sign_unplace('lean-diagnostics', {buffer: bufnr})
   ClearDiagnosticProperties(bufnr)
-  if !config.Get().signs.enable
-    return
-  endif
 
+  var show_signs = config.Get().signs.enable
+  var buffer_lines = getbufline(bufnr, 1, '$')
+  var line_count = len(buffer_lines)
   var sign_id = 1
   var signs: list<any> = []
   var positions_by_type: dict<any> = {}
   for diagnostic in diagnostics
+    if type(diagnostic) != v:t_dict
+      continue
+    endif
     var tags = get(diagnostic, 'leanTags', [])
     var range = get(diagnostic, 'fullRange', get(diagnostic, 'range', {}))
-    if empty(range)
+    if !ValidRange(range, line_count)
       continue
     endif
     if tags ==# [1]
-      add(signs, {
-        id: sign_id,
-        group: 'lean-diagnostics',
-        name: 'LeanGoalUnsolved',
-        buffer: bufnr,
-        lnum: range.end.line + 1,
-        priority: 11,
-      })
-      sign_id += 1
+      if show_signs
+        add(signs, {
+          id: sign_id,
+          group: 'lean-diagnostics',
+          name: 'LeanGoalUnsolved',
+          buffer: bufnr,
+          lnum: min([range.end.line, line_count - 1]) + 1,
+          priority: 11,
+        })
+        sign_id += 1
+      endif
       continue
     elseif tags ==# [2]
-      add(signs, {
-        id: sign_id,
-        group: 'lean-diagnostics',
-        name: 'LeanGoalAccomplished',
-        buffer: bufnr,
-        lnum: range.start.line + 1,
-        priority: 11,
-      })
-      sign_id += 1
+      if show_signs
+        add(signs, {
+          id: sign_id,
+          group: 'lean-diagnostics',
+          name: 'LeanGoalAccomplished',
+          buffer: bufnr,
+          lnum: range.start.line + 1,
+          priority: 11,
+        })
+        sign_id += 1
+      endif
       continue
     elseif get(diagnostic, 'isSilent', false)
       continue
     endif
 
     var severity = DiagnosticSeverity(diagnostic)
-    add(signs, {
-      id: sign_id,
-      group: 'lean-diagnostics',
-      name: 'LeanDiagnostic' .. severity,
-      buffer: bufnr,
-      lnum: range.start.line + 1,
-      priority: 15 - get(diagnostic, 'severity', 1),
-    })
-    sign_id += 1
+    var severity_number = DiagnosticSeverityNumber(diagnostic)
+    if show_signs
+      add(signs, {
+        id: sign_id,
+        group: 'lean-diagnostics',
+        name: 'LeanDiagnostic' .. severity,
+        buffer: bufnr,
+        lnum: range.start.line + 1,
+        priority: 15 - severity_number,
+      })
+      sign_id += 1
+    endif
 
     try
       var start_line = range.start.line + 1
-      var end_line = range.end.line + 1
-      var start_text = getbufline(bufnr, start_line)[0]
-      var end_text = getbufline(bufnr, end_line)[0]
+      var end_line = min([range.end.line, line_count - 1]) + 1
+      var start_text = buffer_lines[start_line - 1]
+      var end_text = buffer_lines[end_line - 1]
       var start_col = util.ByteColumn(start_text, range.start.character) + 1
-      var end_col = util.ByteColumn(end_text, range.end.character) + 1
+      var end_col = range.end.line >= line_count
+        ? strlen(end_text) + 1
+        : util.ByteColumn(end_text, range.end.character) + 1
       if end_line == start_line && end_col <= start_col
         end_col = start_col + 1
       endif
@@ -521,8 +823,11 @@ def RenderProgress(uri: string, processing: list<any>)
   var sign_id = 1
   var signs: list<any> = []
   for info in processing
+    if type(info) != v:t_dict
+      continue
+    endif
     var range = get(info, 'range', {})
-    if empty(range)
+    if !ValidRange(range, line_count)
       continue
     endif
     var first = max([0, range.start.line])
@@ -547,80 +852,231 @@ def RenderProgress(uri: string, processing: list<any>)
   endif
 enddef
 
-def HandleNotification(root: string, message: dict<any>)
+def OwnsUri(server: dict<any>, uri: string): bool
+  return index(values(get(server, 'opened', {})), uri) >= 0
+enddef
+
+def HandleNotification(server: dict<any>, message: dict<any>)
   var method = message.method
   var params = get(message, 'params', {})
   if method ==# 'textDocument/publishDiagnostics'
-    diagnostics_by_uri[params.uri] = get(params, 'diagnostics', [])
+    if type(params) != v:t_dict || type(get(params, 'uri', v:null)) != v:t_string
+      return
+    endif
+    if !OwnsUri(server, params.uri)
+      return
+    endif
+    var diagnostics = get(params, 'diagnostics', [])
+    if type(diagnostics) != v:t_list
+      diagnostics = []
+    endif
+    if NotificationIsStale(params.uri, get(params, 'version', v:null))
+      return
+    endif
+    diagnostics_by_uri[params.uri] = diagnostics
     RenderDiagnostics(params.uri, diagnostics_by_uri[params.uri])
     silent doautocmd <nomodeline> User LeanDiagnosticsUpdate
   elseif method ==# '$/lean/fileProgress'
+    if type(params) != v:t_dict
+        || type(get(params, 'textDocument', v:null)) != v:t_dict
+        || type(get(params.textDocument, 'uri', v:null)) != v:t_string
+      return
+    endif
     var uri = params.textDocument.uri
-    progress_by_uri[uri] = get(params, 'processing', [])
+    if !OwnsUri(server, uri)
+      return
+    endif
+    if NotificationIsStale(uri, get(params.textDocument, 'version', v:null))
+      return
+    endif
+    var processing = get(params, 'processing', [])
+    progress_by_uri[uri] = type(processing) == v:t_list ? processing : []
     RenderProgress(uri, progress_by_uri[uri])
     silent doautocmd <nomodeline> User LeanProgressUpdate
   elseif method ==# 'window/showMessage'
-    util.Notify(get(params, 'message', 'Lean server message'), get(params, 'type', 3) == 1 ? 'ErrorMsg' : 'WarningMsg')
+    if type(params) == v:t_dict && type(get(params, 'message', v:null)) == v:t_string
+      util.Notify(params.message,
+        get(params, 'type', 3) == 1 ? 'ErrorMsg' : 'WarningMsg')
+    endif
   elseif method ==# 'window/logMessage'
-    add(stderr_history, get(params, 'message', ''))
+    if type(params) == v:t_dict && type(get(params, 'message', v:null)) == v:t_string
+      AddHistory(params.message)
+    endif
   endif
 enddef
 
-export def ApplyWorkspaceEdit(edit: dict<any>): bool
-  var applied = true
-  for [uri, edits] in items(get(edit, 'changes', {}))
-    applied = util.ApplyTextEdits(uri, edits) && applied
+export def ApplyWorkspaceEdit(edit: any): bool
+  if type(edit) != v:t_dict
+    return false
+  endif
+  var operations: list<any> = []
+  if has_key(edit, 'documentChanges')
+    if type(edit.documentChanges) != v:t_list
+      return false
+    endif
+    for change in edit.documentChanges
+      # Resource operations are deliberately unsupported. Reject them before
+      # applying any preceding text-document edits.
+      if type(change) != v:t_dict || !has_key(change, 'edits')
+          || type(change.edits) != v:t_list
+          || type(get(change, 'textDocument', v:null)) != v:t_dict
+          || type(get(change.textDocument, 'uri', v:null)) != v:t_string
+        return false
+      endif
+      var version = get(change.textDocument, 'version', v:null)
+      if type(version) != v:t_number && type(version) != v:t_none
+        return false
+      endif
+      add(operations, {
+        uri: change.textDocument.uri,
+        version: version,
+        edits: change.edits,
+      })
+    endfor
+  else
+    var changes = get(edit, 'changes', {})
+    if type(changes) != v:t_dict
+      return false
+    endif
+    for [uri, edits] in items(changes)
+      if type(edits) != v:t_list
+        return false
+      endif
+      add(operations, {uri: uri, version: v:null, edits: edits})
+    endfor
+  endif
+
+  var prepared_edits: list<any> = []
+  var seen_uris: dict<bool> = {}
+  for operation in operations
+    if empty(operation.uri) || has_key(seen_uris, operation.uri)
+      return false
+    endif
+    seen_uris[operation.uri] = true
+    if type(operation.version) == v:t_number
+      var target_bufnr = bufnr(util.PathFromUri(operation.uri))
+      if target_bufnr < 0 || !bufloaded(target_bufnr)
+          || getbufvar(target_bufnr, 'lean_lsp_version', -1) != operation.version
+        return false
+      endif
+    endif
+    var prepared = util.PrepareTextEdits(operation.uri, operation.edits)
+    if !get(prepared, 'ok', false)
+      return false
+    endif
+    add(prepared_edits, prepared)
   endfor
-  for change in get(edit, 'documentChanges', [])
-    if has_key(change, 'edits') && has_key(change, 'textDocument')
-      applied = util.ApplyTextEdits(change.textDocument.uri, change.edits) && applied
-    else
-      applied = false
+
+  # Nothing asynchronous can interleave with the commit below, but validate
+  # every target once more before changing the first buffer. This prevents a
+  # listener or prior preparation side effect from producing a partial edit.
+  for prepared in prepared_edits
+    if get(prepared, 'changed', false)
+        && (!bufloaded(get(prepared, 'bufnr', -1))
+          || !getbufvar(prepared.bufnr, '&modifiable')
+          || util.BufText(prepared.bufnr) !=# prepared.original)
+      return false
     endif
   endfor
-  return applied
+
+  var applied_edits: list<any> = []
+  for prepared in prepared_edits
+    if get(prepared, 'changed', false)
+      add(applied_edits, prepared)
+    endif
+    if !util.ApplyPreparedTextEdits(prepared)
+      for applied in reverse(copy(applied_edits))
+        util.RestorePreparedTextEdits(applied)
+      endfor
+      return false
+    endif
+  endfor
+  # TextChanged may not run until control returns to Vim. Synchronize edits
+  # before a following code-action command can observe stale server state.
+  for prepared in applied_edits
+    FlushChange(prepared.bufnr)
+  endfor
+  return true
+enddef
+
+def InvalidParams(server: dict<any>, message: dict<any>, detail: string)
+  Respond(server, message.id, v:null, {code: -32602, message: detail})
+enddef
+
+def HandleShowMessageRequest(server: dict<any>, message: dict<any>, params: any)
+  if type(params) != v:t_dict || type(get(params, 'message', v:null)) != v:t_string
+    InvalidParams(server, message, 'window/showMessageRequest requires a string message')
+    return
+  endif
+  var actions = get(params, 'actions', [])
+  if type(actions) != v:t_list
+    InvalidParams(server, message, 'window/showMessageRequest actions must be an array')
+    return
+  endif
+  if empty(actions)
+    util.Notify(params.message)
+    Respond(server, message.id, v:null)
+    return
+  endif
+  var choices = [params.message]
+  for action in actions
+    if type(action) != v:t_dict || type(get(action, 'title', v:null)) != v:t_string
+      InvalidParams(server, message, 'window/showMessageRequest actions require string titles')
+      return
+    endif
+    add(choices, $'{len(choices)}. {action.title}')
+  endfor
+  var selection = inputlist(choices)
+  Respond(server, message.id,
+    selection > 0 && selection <= len(actions) ? actions[selection - 1] : v:null)
 enddef
 
 def HandleServerRequest(root: string, server: dict<any>, message: dict<any>)
   var method = message.method
   var params = get(message, 'params', {})
   if method ==# 'workspace/configuration'
+    if type(params) != v:t_dict || type(get(params, 'items', v:null)) != v:t_list
+      InvalidParams(server, message, 'workspace/configuration requires an items array')
+      return
+    endif
     var result: list<any> = []
-    for _ in get(params, 'items', [])
+    for _ in params.items
       add(result, v:null)
     endfor
     Respond(server, message.id, result)
   elseif method ==# 'workspace/workspaceFolders'
     Respond(server, message.id, [{uri: util.UriFromPath(root), name: fnamemodify(root, ':t')}])
   elseif method ==# 'workspace/applyEdit'
-    Respond(server, message.id, {applied: ApplyWorkspaceEdit(get(params, 'edit', {}))})
+    if type(params) != v:t_dict || type(get(params, 'edit', v:null)) != v:t_dict
+      InvalidParams(server, message, 'workspace/applyEdit requires an edit object')
+      return
+    endif
+    Respond(server, message.id, {applied: ApplyWorkspaceEdit(params.edit)})
   elseif method ==# 'workspace/semanticTokens/refresh'
     Respond(server, message.id, v:null)
     RefreshSemanticTokens(server)
-  elseif index([
-      'window/workDoneProgress/create',
-      'client/registerCapability',
-      'client/unregisterCapability',
-      'workspace/inlayHint/refresh',
-      'workspace/codeLens/refresh',
-    ], method) >= 0
-    Respond(server, message.id, v:null)
   elseif method ==# 'window/showMessageRequest'
-    Respond(server, message.id, get(get(params, 'actions', []), 0, v:null))
+    HandleShowMessageRequest(server, message, params)
   else
     Respond(server, message.id, v:null, {code: -32601, message: $'unsupported client request: {method}'})
   endif
 enddef
 
-def Dispatch(root: string, message: any)
-  if type(message) != v:t_dict || !has_key(servers, root)
+def Dispatch(server: dict<any>, message: any)
+  if type(message) != v:t_dict
     return
   endif
-  var server = servers[root]
+  var root = server.root
+  if server.stopping && has_key(message, 'method')
+    if has_key(message, 'id')
+      Respond(server, message.id, v:null, {code: -32800, message: 'Lean client is shutting down'})
+    endif
+    return
+  endif
   if has_key(message, 'method') && has_key(message, 'id')
     HandleServerRequest(root, server, message)
   elseif has_key(message, 'method')
-    HandleNotification(root, message)
+    HandleNotification(server, message)
   elseif has_key(message, 'id')
     var key = string(message.id)
     if has_key(server.pending, key)
@@ -630,11 +1086,11 @@ def Dispatch(root: string, message: any)
   endif
 enddef
 
-def OnStdout(root: string, _channel: channel, chunk: string)
-  if !has_key(servers, root)
+def OnStdout(server: dict<any>, _channel: channel, chunk: string)
+  if !IsCurrentServer(server) && !server.stopping
     return
   endif
-  var server = servers[root]
+  var root = server.root
   server.recv ..= chunk
   while true
     var header_end = stridx(server.recv, "\r\n\r\n")
@@ -662,7 +1118,7 @@ def OnStdout(root: string, _channel: channel, chunk: string)
       continue
     endtry
     try
-      Dispatch(root, decoded)
+      Dispatch(server, decoded)
     catch
       util.Notify($'failed to handle JSON-RPC message: {v:exception}', 'ErrorMsg')
     endtry
@@ -670,11 +1126,9 @@ def OnStdout(root: string, _channel: channel, chunk: string)
 enddef
 
 def StartServer(root: string): dict<any>
-  var command = ServerCommand(root)
   var server: dict<any> = {
     root: root,
-    command: command,
-    next_id: 1,
+    command: [],
     pending: {},
     queue: [],
     recv: '',
@@ -688,9 +1142,15 @@ def StartServer(root: string): dict<any>
     failed: false,
     running: true,
     stopping: false,
+    stop_timer: -1,
   }
   servers[root] = server
   try
+    var command = ServerCommand(root)
+    if empty(command)
+      throw 'language-server command is empty'
+    endif
+    server.command = command
     server.job = job_start(command, {
       cwd: root,
       in_io: 'pipe',
@@ -699,19 +1159,22 @@ def StartServer(root: string): dict<any>
       in_mode: 'raw',
       out_mode: 'raw',
       err_mode: 'nl',
-      out_cb: (channel, message) => OnStdout(root, channel, message),
-      err_cb: (channel, message) => OnStderr(root, channel, message),
-      exit_cb: (job_object, status) => OnExit(root, job_object, status),
+      out_cb: (channel, message) => OnStdout(server, channel, message),
+      err_cb: (channel, message) => OnStderr(server, channel, message),
+      exit_cb: (job_object, status) => OnExit(server, job_object, status),
     })
     server.channel = job_getchannel(server.job)
     if job_status(server.job) ==# 'fail'
       throw $'unable to start {join(command, " ")}'
     endif
     RequestNow(server, 'initialize', InitParams(root),
-      (result, error) => OnInitialized(root, result, error))
+      (result, error) => OnInitialized(server, result, error))
   catch
     server.failed = true
     server.running = false
+    if has_key(server, 'job') && job_status(server.job) ==# 'run'
+      job_stop(server.job)
+    endif
     util.Notify($'cannot start Lean language server: {v:exception}', 'ErrorMsg')
   endtry
   return server
@@ -726,12 +1189,33 @@ enddef
 
 export def Attach(bufnr: number): bool
   if !config.Get().lsp.enable || empty(bufname(bufnr))
+      || getbufvar(bufnr, '&filetype') !=# 'lean'
     return false
   endif
-  var root = ProjectRoot(bufname(bufnr))
   var key = string(bufnr)
+  var uri = util.UriFromBuf(bufnr)
+  if has_key(buffer_roots, key)
+      && getbufvar(bufnr, 'lean_lsp_uri', '') ==# uri
+    var existing_root = buffer_roots[key]
+    var existing_server = EnsureServer(existing_root)
+    existing_server.buffers[key] = true
+    if existing_server.initialized && !has_key(existing_server.opened, key)
+      SendDidOpen(existing_server, bufnr)
+    endif
+    return !existing_server.failed
+  endif
+
+  var previous_uri = getbufvar(bufnr, 'lean_lsp_uri', '')
+  if has_key(buffer_roots, key)
+    Detach(bufnr)
+  endif
+  if !empty(previous_uri) && previous_uri !=# uri
+    setbufvar(bufnr, 'lean_lsp_version', 0)
+  endif
+  var root = ProjectRoot(bufname(bufnr))
   buffer_roots[key] = root
   setbufvar(bufnr, 'lean_lsp_root', root)
+  setbufvar(bufnr, 'lean_lsp_uri', uri)
   var server = EnsureServer(root)
   server.buffers[key] = true
   if server.initialized && !has_key(server.opened, key)
@@ -749,15 +1233,28 @@ export def Detach(bufnr: number)
     remove(last_change_flush_ms, key)
   endif
   if !has_key(buffer_roots, key)
+    if bufexists(bufnr)
+      ClearBufferDecorations({}, bufnr, true)
+      setbufvar(bufnr, 'lean_lsp_attached', false)
+      setbufvar(bufnr, 'lean_lsp_uri', '')
+    endif
     return
   endif
   var root = remove(buffer_roots, key)
   if !has_key(servers, root)
+    if bufexists(bufnr)
+      ClearBufferDecorations({}, bufnr, true)
+      setbufvar(bufnr, 'lean_lsp_attached', false)
+      setbufvar(bufnr, 'lean_lsp_uri', '')
+    endif
     return
   endif
   var server = servers[root]
+  var uri = get(server.opened, key, getbufvar(bufnr, 'lean_lsp_uri', ''))
   if has_key(server.opened, key)
-    NotifyServer(server, 'textDocument/didClose', {textDocument: {uri: util.UriFromBuf(bufnr)}})
+    if server.initialized && SupportsOpenClose(server)
+      NotifyServer(server, 'textDocument/didClose', {textDocument: {uri: uri}})
+    endif
     remove(server.opened, key)
   endif
   if has_key(server.synced_texts, key)
@@ -773,14 +1270,16 @@ export def Detach(bufnr: number)
   if has_key(server.buffers, key)
     remove(server.buffers, key)
   endif
-  ClearSemanticTokens(server, bufnr)
+  ClearBufferDecorations(server, bufnr, true)
+  ClearUriState(uri)
   setbufvar(bufnr, 'lean_lsp_attached', false)
+  setbufvar(bufnr, 'lean_lsp_uri', '')
 enddef
 
 def FlushChange(bufnr: number)
   var key = string(bufnr)
   if has_key(change_timers, key)
-    remove(change_timers, key)
+    timer_stop(remove(change_timers, key))
   endif
   if !has_key(buffer_roots, key) || !bufloaded(bufnr)
     return
@@ -793,6 +1292,10 @@ def FlushChange(bufnr: number)
   var current_text = util.BufText(bufnr)
   var previous_text = get(server.synced_texts, key, v:null)
   if type(previous_text) == v:t_string && previous_text ==# current_text
+    return
+  endif
+  if SyncKind(server) == 0
+    server.synced_texts[key] = current_text
     return
   endif
   var version = getbufvar(bufnr, 'lean_lsp_version', 0) + 1
@@ -834,11 +1337,30 @@ export def DidSave(bufnr: number)
     return
   endif
   FlushChange(bufnr)
-  var server = servers[buffer_roots[key]]
-  NotifyServer(server, 'textDocument/didSave', {
-    textDocument: {uri: util.UriFromBuf(bufnr)},
-    text: util.BufText(bufnr),
-  })
+  var root = buffer_roots[key]
+  if !has_key(servers, root)
+    return
+  endif
+  var server = servers[root]
+  if !server.running || !server.initialized || !has_key(server.opened, key)
+    return
+  endif
+  var sync = get(server.capabilities, 'textDocumentSync', {})
+  if type(sync) != v:t_dict
+    return
+  endif
+  var save = get(sync, 'save', false)
+  if !(type(save) == v:t_bool && save) && type(save) != v:t_dict
+    return
+  endif
+  var params: dict<any> = {textDocument: {uri: util.UriFromBuf(bufnr)}}
+  if type(save) == v:t_dict
+    var include_text = get(save, 'includeText', false)
+    if type(include_text) == v:t_bool && include_text
+      params.text = util.BufText(bufnr)
+    endif
+  endif
+  NotifyServer(server, 'textDocument/didSave', params)
 enddef
 
 export def Request(bufnr: number, method: string, params: any, callback: any): number
@@ -849,24 +1371,56 @@ export def Request(bufnr: number, method: string, params: any, callback: any): n
     endif
     return -1
   endif
-  var server = servers[buffer_roots[key]]
+  var root = buffer_roots[key]
+  if !has_key(servers, root)
+    if type(callback) == v:t_func
+      call(callback, [v:null, {code: -32000, message: 'Lean language server is unavailable'}])
+    endif
+    return -1
+  endif
+  var server = servers[root]
   if server.failed
     if type(callback) == v:t_func
       call(callback, [v:null, {code: -32000, message: 'Lean language server failed to start'}])
     endif
     return -1
   endif
+  if !server.running
+    if type(callback) == v:t_func
+      call(callback, [v:null, {
+        code: -32097,
+        message: 'Lean language server has exited; run :LeanRestartServer',
+      }])
+    endif
+    return -1
+  endif
   if !server.initialized
-    add(server.queue, {method: method, params: params, callback: callback})
-    return 0
+    var id = next_request_id
+    next_request_id += 1
+    add(server.queue, {id: id, method: method, params: params, callback: callback})
+    return id
   endif
   return RequestNow(server, method, params, callback)
+enddef
+
+export def Cancel(bufnr: number, request_id: number)
+  if request_id <= 0
+    return
+  endif
+  var key = string(bufnr)
+  if !has_key(buffer_roots, key) || !has_key(servers, buffer_roots[key])
+    return
+  endif
+  CancelRequest(servers[buffer_roots[key]], request_id)
 enddef
 
 export def Notify(bufnr: number, method: string, params: any)
   var key = string(bufnr)
   if has_key(buffer_roots, key) && has_key(servers, buffer_roots[key])
-    NotifyServer(servers[buffer_roots[key]], method, params)
+    var server = servers[buffer_roots[key]]
+    if server.running
+      NotifyServer(server, method, params)
+    endif
   endif
 enddef
 
@@ -876,8 +1430,39 @@ export def RestartFile(bufnr: number)
     return
   endif
   var server = servers[buffer_roots[key]]
-  NotifyServer(server, 'textDocument/didClose', {textDocument: {uri: util.UriFromBuf(bufnr)}})
+  if !server.running || !server.initialized
+    util.Notify('Lean language server is not ready; use :LeanRestartServer', 'WarningMsg')
+    return
+  endif
+  if !SupportsOpenClose(server) || !has_key(server.opened, key)
+    util.Notify('Lean language server does not support restarting open documents', 'WarningMsg')
+    return
+  endif
+  NotifyServer(server, 'textDocument/didClose', {
+    textDocument: {uri: server.opened[key]},
+  })
+  remove(server.opened, key)
   SendDidOpen(server, bufnr, 'once')
+enddef
+
+def ForceStop(server: dict<any>)
+  server.stop_timer = -1
+  if has_key(server, 'job') && job_status(server.job) ==# 'run'
+    job_stop(server.job)
+  endif
+enddef
+
+def FinishStop(server: dict<any>, _result: any, _error: any)
+  if !server.stopping || !server.running
+    return
+  endif
+  if get(server, 'stop_timer', -1) >= 0
+    timer_stop(server.stop_timer)
+  endif
+  NotifyServer(server, 'exit', v:null)
+  # A conforming server exits after the notification. Keep a short fallback
+  # for broken servers so restart and Vim exit cannot leak the process.
+  server.stop_timer = timer_start(250, (_) => ForceStop(server))
 enddef
 
 def StopServer(root: string)
@@ -886,13 +1471,25 @@ def StopServer(root: string)
   endif
   var server = servers[root]
   server.stopping = true
-  if server.initialized
-    RequestNow(server, 'shutdown', v:null, (_result, _error) => NotifyServer(server, 'exit', v:null))
-  endif
-  if has_key(server, 'job') && job_status(server.job) ==# 'run'
-    job_stop(server.job)
-  endif
+  for key in keys(server.buffers)
+    var bufnr = str2nr(key)
+    ClearBufferDecorations(server, bufnr, true)
+    if bufexists(bufnr)
+      setbufvar(bufnr, 'lean_lsp_attached', false)
+      setbufvar(bufnr, 'lean_lsp_uri', '')
+    endif
+  endfor
+  server.pending = {}
+  server.queue = []
   remove(servers, root)
+  if server.initialized && has_key(server, 'channel')
+      && ch_status(server.channel) !=# 'closed'
+    RequestNow(server, 'shutdown', v:null,
+      (result, error) => FinishStop(server, result, error))
+    server.stop_timer = timer_start(1000, (_) => ForceStop(server))
+  else
+    ForceStop(server)
+  endif
 enddef
 
 export def RestartServer(bufnr: number)
@@ -902,7 +1499,7 @@ export def RestartServer(bufnr: number)
     return
   endif
   var root = buffer_roots[key]
-  var buffers = keys(servers[root].buffers)
+  var buffers = keys(filter(copy(buffer_roots), (_, candidate_root) => candidate_root ==# root))
   StopServer(root)
   for buffer_key in buffers
     remove(buffer_roots, buffer_key)
@@ -914,6 +1511,18 @@ export def StopAll()
   for root in copy(keys(servers))
     StopServer(root)
   endfor
+  for timer in values(change_timers)
+    timer_stop(timer)
+  endfor
+  change_timers = {}
+  last_change_flush_ms = {}
+  for key in keys(buffer_roots)
+    var bufnr = str2nr(key)
+    if bufexists(bufnr)
+      setbufvar(bufnr, 'lean_lsp_attached', false)
+    endif
+  endfor
+  buffer_roots = {}
 enddef
 
 export def Diagnostics(uri: string): list<any>
@@ -922,12 +1531,14 @@ enddef
 
 export def DiagnosticsAt(bufnr: number, line_index: number): list<any>
   var result: list<any> = []
+  var line_count = len(getbufline(bufnr, 1, '$'))
   for diagnostic in Diagnostics(util.UriFromBuf(bufnr))
-    if get(diagnostic, 'isSilent', false)
+    if type(diagnostic) != v:t_dict || get(diagnostic, 'isSilent', false)
       continue
     endif
     var range = get(diagnostic, 'fullRange', get(diagnostic, 'range', {}))
-    if !empty(range) && line_index >= range.start.line && line_index <= range.end.line
+    if ValidRange(range, line_count)
+        && line_index >= range.start.line && line_index <= range.end.line
       add(result, diagnostic)
     endif
   endfor
@@ -935,9 +1546,14 @@ export def DiagnosticsAt(bufnr: number, line_index: number): list<any>
 enddef
 
 export def ProgressAt(bufnr: number, line_index: number): bool
+  var line_count = len(getbufline(bufnr, 1, '$'))
   for info in get(progress_by_uri, util.UriFromBuf(bufnr), [])
+    if type(info) != v:t_dict
+      continue
+    endif
     var range = get(info, 'range', {})
-    if !empty(range) && line_index >= range.start.line && line_index <= range.end.line
+    if ValidRange(range, line_count)
+        && line_index >= range.start.line && line_index <= range.end.line
       return true
     endif
   endfor

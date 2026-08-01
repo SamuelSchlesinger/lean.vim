@@ -9,6 +9,13 @@ import autoload 'lean/util.vim' as util
 var base_abbreviations: dict<string> = {}
 var all_abbreviations: dict<string> = {}
 var sources_by_initial: dict<list<string>> = {}
+const property_type = 'LeanAbbreviationMark'
+const property_id = 1
+const trigger_mappings = {
+  space: '<Space>',
+  tab: '<Tab>',
+  cr: '<CR>',
+}
 
 def Load(): dict<string>
   if !empty(base_abbreviations)
@@ -64,6 +71,9 @@ enddef
 
 export def ConvertText(text: string): string
   var leader = config.Get().abbreviations.leader
+  if empty(leader) || strchars(leader) != 1
+    return text
+  endif
   if stridx(text, leader) != 0
     return text
   endif
@@ -100,36 +110,62 @@ export def ConvertText(text: string): string
   return replacement .. ConvertText(strpart(rest, match_length))
 enddef
 
-def ClearMark(bufnr: number)
-  setbufvar(bufnr, 'lean_abbrev_active', false)
-  setbufvar(bufnr, 'lean_abbrev_line', 0)
-  setbufvar(bufnr, 'lean_abbrev_start', -1)
+def EnsurePropertyType(bufnr: number)
+  highlight default link LeanAbbreviationMark Underlined
+  if empty(prop_type_get(property_type, {bufnr: bufnr}))
+    prop_type_add(property_type, {
+      bufnr: bufnr,
+      highlight: 'LeanAbbreviationMark',
+      start_incl: true,
+      end_incl: true,
+    })
+  endif
 enddef
 
 def RestoreMappings(bufnr: number)
   if !bufexists(bufnr)
     return
   endif
+  if !getbufvar(bufnr, 'lean_abbrev_maps_installed', false)
+    return
+  endif
+  # :iunmap <buffer> and mapset() operate on the current buffer. BufLeave
+  # normally invokes us while that buffer is still current; retain the saved
+  # state as a fallback if another caller reaches us later.
+  if bufnr != bufnr()
+    setbufvar(bufnr, 'lean_abbrev_restore_pending', true)
+    return
+  endif
+
   var saved: dict<any> = getbufvar(bufnr, 'lean_abbrev_saved_maps', {})
-  for key in ['tab', 'cr']
-    var lhs = key ==# 'tab' ? '<Tab>' : '<CR>'
+  # Flip the guard first so nested cleanup is harmless.
+  setbufvar(bufnr, 'lean_abbrev_maps_installed', false)
+  for [key, lhs] in items(trigger_mappings)
     execute $'silent! iunmap <buffer> {lhs}'
     if has_key(saved, key) && !empty(saved[key])
       mapset('i', false, saved[key])
     endif
   endfor
   setbufvar(bufnr, 'lean_abbrev_saved_maps', {})
-  ClearMark(bufnr)
+  setbufvar(bufnr, 'lean_abbrev_restore_pending', false)
 enddef
 
 def InstallMappings(bufnr: number)
-  var saved = {
-    tab: maparg('<Tab>', 'i', false, true),
-    cr: maparg('<CR>', 'i', false, true),
-  }
+  if getbufvar(bufnr, 'lean_abbrev_maps_installed', false)
+    return
+  endif
+  var saved: dict<any> = {}
+  for [key, lhs] in items(trigger_mappings)
+    var mapping = maparg(lhs, 'i', false, true)
+    # A buffer-local overlay does not disturb a global mapping, so only a
+    # buffer-local mapping needs to be recreated during cleanup.
+    saved[key] = !empty(mapping) && get(mapping, 'buffer', 0) ? mapping : {}
+  endfor
   setbufvar(bufnr, 'lean_abbrev_saved_maps', saved)
-  execute 'inoremap <silent><buffer><expr> <Tab> lean#abbreviations#Key("\<Tab>")'
-  execute 'inoremap <silent><buffer><expr> <CR> lean#abbreviations#Key("\<CR>")'
+  setbufvar(bufnr, 'lean_abbrev_maps_installed', true)
+  inoremap <silent><buffer> <Space> <Cmd>call lean#abbreviations#Trigger('space')<CR>
+  inoremap <silent><buffer> <Tab> <Cmd>call lean#abbreviations#Trigger('tab')<CR>
+  inoremap <silent><buffer> <CR> <Cmd>call lean#abbreviations#Trigger('cr')<CR><CR>
 enddef
 
 def ConvertedWithCursor(typed: string): dict<any>
@@ -144,96 +180,187 @@ def ConvertedWithCursor(typed: string): dict<any>
   }
 enddef
 
-def ExpandBuffer(bufnr: number, collapse: bool = false)
-  if bufnr != bufnr() || !getbufvar(bufnr, 'lean_abbrev_active', false)
-    RestoreMappings(bufnr)
+def ActiveProperty(bufnr: number): dict<any>
+  if !bufexists(bufnr)
+    return {}
+  endif
+  if bufnr == bufnr()
+    # The active abbreviation must end at the insert cursor. Looking only at
+    # that line keeps per-keystroke validation independent of buffer size.
+    for property in prop_list(line('.'), {
+      bufnr: bufnr,
+      ids: [property_id],
+      types: [property_type],
+    })
+      if property.id == property_id && property.type ==# property_type
+        property.lnum = line('.')
+        return property
+      endif
+    endfor
+    return {}
+  endif
+  # This path is only a lifecycle fallback for a buffer which ceased to be
+  # current before its BufLeave cleanup could run.
+  return prop_find({
+    bufnr: bufnr,
+    lnum: 1,
+    col: 1,
+    id: property_id,
+    type: property_type,
+    both: true,
+  }, 'f')
+enddef
+
+def PropertyText(bufnr: number, property: dict<any>): string
+  if empty(property) || !get(property, 'start', false) || !get(property, 'end', false)
+    return ''
+  endif
+  var lines = getbufline(bufnr, property.lnum)
+  if empty(lines)
+    return ''
+  endif
+  return strpart(lines[0], property.col - 1, property.length)
+enddef
+
+def CursorAtPropertyEnd(bufnr: number, property: dict<any>): bool
+  return bufnr == bufnr()
+    && !empty(property)
+    && get(property, 'start', false)
+    && get(property, 'end', false)
+    && property.lnum == line('.')
+    && col('.') - 1 == property.col - 1 + property.length
+enddef
+
+def RemoveProperty(bufnr: number)
+  if bufexists(bufnr) && !empty(prop_type_get(property_type, {bufnr: bufnr}))
+    prop_remove({
+      bufnr: bufnr,
+      id: property_id,
+      type: property_type,
+      both: true,
+      all: true,
+    })
+  endif
+enddef
+
+def ClearState(bufnr: number)
+  if !bufexists(bufnr)
     return
   endif
-  var row = getbufvar(bufnr, 'lean_abbrev_line', 0)
-  var start = getbufvar(bufnr, 'lean_abbrev_start', -1)
-  if row != line('.') || start < 0
-    RestoreMappings(bufnr)
-    return
-  endif
-  var text = getline(row)
-  var cursor_byte = col('.') - 1
-  var delimiter_byte = cursor_byte
-  if delimiter_byte < strlen(text) && strpart(text, delimiter_byte, 1) =~# '\s'
-    # Cursor is on the delimiter inserted after the abbreviation.
-  elseif delimiter_byte > 0 && strpart(text, delimiter_byte - 1, 1) =~# '\s'
-    delimiter_byte -= 1
-  else
-    delimiter_byte = min([strlen(text), col('.')])
-  endif
-  var typed = strpart(text, start, delimiter_byte - start)
-  var conversion = collapse
-    ? {text: config.Get().abbreviations.leader, cursor: strlen(config.Get().abbreviations.leader)}
-    : ConvertedWithCursor(typed)
-  if conversion.text !=# typed
-    var updated = strpart(text, 0, start) .. conversion.text .. strpart(text, delimiter_byte)
-    setline(row, updated)
-    cursor(row, start + conversion.cursor + 1)
-  endif
+  setbufvar(bufnr, 'lean_abbrev_active', false)
+  RemoveProperty(bufnr)
   RestoreMappings(bufnr)
+enddef
+
+def Begin(bufnr: number)
+  EnsurePropertyType(bufnr)
+  RemoveProperty(bufnr)
+  prop_add(line('.'), col('.'), {
+    bufnr: bufnr,
+    id: property_id,
+    type: property_type,
+    length: 0,
+  })
+  setbufvar(bufnr, 'lean_abbrev_active', true)
+  InstallMappings(bufnr)
+enddef
+
+def ReplaceActive(bufnr: number, suffix: string = ''): bool
+  var property = ActiveProperty(bufnr)
+  var typed = PropertyText(bufnr, property)
+  var leader = config.Get().abbreviations.leader
+  if empty(property) || stridx(typed, leader) != 0
+    ClearState(bufnr)
+    return false
+  endif
+
+  var lines = getbufline(bufnr, property.lnum)
+  if empty(lines)
+    ClearState(bufnr)
+    return false
+  endif
+  var original = lines[0]
+  var start = property.col - 1
+  var finish = start + property.length
+  var conversion = ConvertedWithCursor(typed .. suffix)
+  var updated = strpart(original, 0, start)
+    .. conversion.text .. strpart(original, finish)
+
+  ClearState(bufnr)
+  if updated !=# original
+    try
+      undojoin
+    catch /E790:/
+    endtry
+    setbufline(bufnr, property.lnum, updated)
+  endif
+  if bufnr == bufnr()
+    cursor(property.lnum, start + conversion.cursor + 1)
+  endif
+  return true
+enddef
+
+def ReplayTrigger(kind: string)
+  if kind ==# 'space'
+    feedkeys(' ', 'im')
+  elseif kind ==# 'tab'
+    feedkeys("\<Tab>", 'im')
+  endif
 enddef
 
 def OnInsertCharPre()
   var bufnr = bufnr()
   var leader = config.Get().abbreviations.leader
   var active = getbufvar(bufnr, 'lean_abbrev_active', false)
-  if !active && v:char ==# leader
-    setbufvar(bufnr, 'lean_abbrev_active', true)
-    setbufvar(bufnr, 'lean_abbrev_line', line('.'))
-    setbufvar(bufnr, 'lean_abbrev_start', col('.') - 1)
-    InstallMappings(bufnr)
-    return
-  endif
-  if !active
-    return
-  endif
-  if getbufvar(bufnr, 'lean_abbrev_line', 0) != line('.')
-    timer_start(0, (_) => RestoreMappings(bufnr))
-  elseif v:char ==# ' '
-    timer_start(0, (_) => ExpandBuffer(bufnr))
-  elseif v:char ==# leader
-    var start = getbufvar(bufnr, 'lean_abbrev_start', -1)
-    var typed = strpart(getline('.'), start, col('.') - start)
-    if typed ==# leader
-      timer_start(0, (_) => ExpandBuffer(bufnr, true))
+  if active
+    var property = ActiveProperty(bufnr)
+    var typed = PropertyText(bufnr, property)
+    if stridx(typed, leader) != 0 || !CursorAtPropertyEnd(bufnr, property)
+      ClearState(bufnr)
+      active = false
+    elseif v:char ==# leader && typed ==# leader
+      # Suppress the second leader instead of inserting it and deleting the
+      # first one on a timer. This makes escaping synchronous.
+      v:char = ''
+      ClearState(bufnr)
+      return
     endif
+  endif
+  if !active && v:char ==# leader
+    Begin(bufnr)
   endif
 enddef
 
 def OnInsertLeave(bufnr: number)
   if getbufvar(bufnr, 'lean_abbrev_active', false)
-    ExpandBuffer(bufnr)
+    ReplaceActive(bufnr)
+  else
+    RestoreMappings(bufnr)
   endif
 enddef
 
-export def Key(key: string): string
+export def Trigger(kind: string)
   var bufnr = bufnr()
+  var property = ActiveProperty(bufnr)
   if !getbufvar(bufnr, 'lean_abbrev_active', false)
-    return key
+      || !CursorAtPropertyEnd(bufnr, property)
+    ClearState(bufnr)
+    ReplayTrigger(kind)
+    return
   endif
-  var row = getbufvar(bufnr, 'lean_abbrev_line', 0)
-  var start = getbufvar(bufnr, 'lean_abbrev_start', -1)
-  if row != line('.') || start < 0
-    timer_start(0, (_) => RestoreMappings(bufnr))
-    return key
+  var suffix = kind ==# 'space' ? ' ' : ''
+  if !ReplaceActive(bufnr, suffix)
+    ReplayTrigger(kind)
   endif
-  var typed = strpart(getline('.'), start, col('.') - start)
-  var conversion = ConvertedWithCursor(typed)
-  timer_start(0, (_) => RestoreMappings(bufnr))
-  if conversion.text ==# typed
-    return key
-  endif
-  var move_left = strchars(conversion.text) - strchars(strpart(conversion.text, 0, conversion.cursor))
-  var delimiter = key ==# "\<Tab>" ? '' : key
-  return repeat("\<BS>", strchars(typed)) .. conversion.text .. delimiter .. repeat("\<Left>", move_left)
 enddef
 
 export def SetupBuffer(bufnr: number)
   if !config.Get().abbreviations.enable
+    return
+  endif
+  var leader = config.Get().abbreviations.leader
+  if empty(leader) || strchars(leader) != 1
+    util.Notify('abbreviations.leader must be exactly one character', 'ErrorMsg')
     return
   endif
   Load()
@@ -242,6 +369,15 @@ export def SetupBuffer(bufnr: number)
   autocmd!
   execute $'autocmd InsertCharPre <buffer={bufnr}> call lean#abbreviations#InsertCharPre()'
   execute $'autocmd InsertLeave,BufLeave <buffer={bufnr}> call lean#abbreviations#InsertLeave({bufnr})'
+  execute $'autocmd BufEnter <buffer={bufnr}> call lean#abbreviations#InsertLeave({bufnr})'
+  augroup END
+enddef
+
+export def TeardownBuffer(bufnr: number)
+  ClearState(bufnr)
+  var group = $'lean_abbreviations_{bufnr}'
+  execute $'augroup {group}'
+  autocmd!
   augroup END
 enddef
 

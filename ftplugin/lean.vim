@@ -39,4 +39,4 @@ endif
 import autoload 'lean.vim' as lean
 lean.Attach(bufnr())
 
-b:undo_ftplugin = 'setlocal expandtab< shiftwidth< softtabstop< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'
+b:undo_ftplugin = 'call lean#Detach(bufnr()) | setlocal expandtab< shiftwidth< softtabstop< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'

@@ -9,6 +9,46 @@ import autoload 'lean/util.vim' as util
 
 var initialized = false
 var widgets_warning_shown = false
+const plug_commands = [
+  ['LeanInfoviewToggle', 'LeanInfoviewToggle'],
+  ['LeanInfoviewPinTogglePause', 'LeanInfoviewPinTogglePause'],
+  ['LeanInfoviewAddPin', 'LeanInfoviewAddPin'],
+  ['LeanInfoviewClearPins', 'LeanInfoviewClearPins'],
+  ['LeanInfoviewSetDiffPin', 'LeanInfoviewSetDiffPin'],
+  ['LeanInfoviewClearDiffPin', 'LeanInfoviewClearDiffPin'],
+  ['LeanInfoviewToggleAutoDiffPin', 'LeanInfoviewToggleAutoDiffPin'],
+  ['LeanInfoviewToggleNoClearAutoDiffPin', 'LeanInfoviewToggleNoClearAutoDiffPin'],
+  ['LeanInfoviewViewOptions', 'LeanInfoviewViewOptions'],
+  ['LeanInfoviewEnableWidgets', 'LeanInfoviewEnableWidgets'],
+  ['LeanInfoviewDisableWidgets', 'LeanInfoviewDisableWidgets'],
+  ['LeanGotoInfoview', 'LeanGotoInfoview'],
+  ['LeanInfoviewAcceptSuggestion', 'LeanInfoviewAcceptSuggestion'],
+  ['LeanAbbreviationsReverseLookup', 'LeanAbbreviationsReverseLookup'],
+  ['LeanRestartFile', 'LeanRestartFile'],
+  ['LeanHover', 'LeanHover'],
+  ['LeanGoal', 'LeanGoal'],
+  ['LeanCodeAction', 'LeanCodeAction'],
+]
+const suggested_mappings = [
+  ['<LocalLeader>i', 'LeanInfoviewToggle'],
+  ['<LocalLeader>p', 'LeanInfoviewPinTogglePause'],
+  ['<LocalLeader>x', 'LeanInfoviewAddPin'],
+  ['<LocalLeader>c', 'LeanInfoviewClearPins'],
+  ['<LocalLeader>dx', 'LeanInfoviewSetDiffPin'],
+  ['<LocalLeader>dc', 'LeanInfoviewClearDiffPin'],
+  ['<LocalLeader>dd', 'LeanInfoviewToggleAutoDiffPin'],
+  ['<LocalLeader>dt', 'LeanInfoviewToggleNoClearAutoDiffPin'],
+  ['<LocalLeader>v', 'LeanInfoviewViewOptions'],
+  ['<LocalLeader>w', 'LeanInfoviewEnableWidgets'],
+  ['<LocalLeader>W', 'LeanInfoviewDisableWidgets'],
+  ['<LocalLeader><Tab>', 'LeanGotoInfoview'],
+  ['<LocalLeader>s', 'LeanInfoviewAcceptSuggestion'],
+  ["<LocalLeader>\\", 'LeanAbbreviationsReverseLookup'],
+  ['<LocalLeader>r', 'LeanRestartFile'],
+  ['<LocalLeader>g', 'LeanGoal'],
+  ['<LocalLeader>a', 'LeanCodeAction'],
+  ['K', 'LeanHover'],
+]
 
 export def Init()
   if initialized
@@ -21,70 +61,58 @@ export def Init()
 enddef
 
 def DefinePlugMappings()
-  var plugs = [
-    ['LeanInfoviewToggle', 'LeanInfoviewToggle'],
-    ['LeanInfoviewPinTogglePause', 'LeanInfoviewPinTogglePause'],
-    ['LeanInfoviewAddPin', 'LeanInfoviewAddPin'],
-    ['LeanInfoviewClearPins', 'LeanInfoviewClearPins'],
-    ['LeanInfoviewSetDiffPin', 'LeanInfoviewSetDiffPin'],
-    ['LeanInfoviewClearDiffPin', 'LeanInfoviewClearDiffPin'],
-    ['LeanInfoviewToggleAutoDiffPin', 'LeanInfoviewToggleAutoDiffPin'],
-    ['LeanInfoviewToggleNoClearAutoDiffPin', 'LeanInfoviewToggleNoClearAutoDiffPin'],
-    ['LeanInfoviewViewOptions', 'LeanInfoviewViewOptions'],
-    ['LeanInfoviewEnableWidgets', 'LeanInfoviewEnableWidgets'],
-    ['LeanInfoviewDisableWidgets', 'LeanInfoviewDisableWidgets'],
-    ['LeanGotoInfoview', 'LeanGotoInfoview'],
-    ['LeanInfoviewAcceptSuggestion', 'LeanInfoviewAcceptSuggestion'],
-    ['LeanAbbreviationsReverseLookup', 'LeanAbbreviationsReverseLookup'],
-    ['LeanRestartFile', 'LeanRestartFile'],
-    ['LeanHover', 'LeanHover'],
-    ['LeanGoal', 'LeanGoal'],
-    ['LeanCodeAction', 'LeanCodeAction'],
-  ]
-  for [plug, command] in plugs
+  for [plug, command] in plug_commands
     execute $'nnoremap <silent><buffer> <Plug>({plug}) <Cmd>{command}<CR>'
   endfor
 enddef
 
 export def UseSuggestedMappings()
   DefinePlugMappings()
-  var mappings = [
-    ['<LocalLeader>i', 'LeanInfoviewToggle'],
-    ['<LocalLeader>p', 'LeanInfoviewPinTogglePause'],
-    ['<LocalLeader>x', 'LeanInfoviewAddPin'],
-    ['<LocalLeader>c', 'LeanInfoviewClearPins'],
-    ['<LocalLeader>dx', 'LeanInfoviewSetDiffPin'],
-    ['<LocalLeader>dc', 'LeanInfoviewClearDiffPin'],
-    ['<LocalLeader>dd', 'LeanInfoviewToggleAutoDiffPin'],
-    ['<LocalLeader>dt', 'LeanInfoviewToggleNoClearAutoDiffPin'],
-    ['<LocalLeader>v', 'LeanInfoviewViewOptions'],
-    ['<LocalLeader>w', 'LeanInfoviewEnableWidgets'],
-    ['<LocalLeader>W', 'LeanInfoviewDisableWidgets'],
-    ['<LocalLeader><Tab>', 'LeanGotoInfoview'],
-    ['<LocalLeader>s', 'LeanInfoviewAcceptSuggestion'],
-    ["<LocalLeader>\\", 'LeanAbbreviationsReverseLookup'],
-    ['<LocalLeader>r', 'LeanRestartFile'],
-    ['<LocalLeader>g', 'LeanGoal'],
-    ['<LocalLeader>a', 'LeanCodeAction'],
-    ['K', 'LeanHover'],
-  ]
-  for [lhs, plug] in mappings
+  for [lhs, plug] in suggested_mappings
     execute $'nmap <silent><buffer> {lhs} <Plug>({plug})'
   endfor
 enddef
 
-def AutoOpen(bufnr: number)
-  if bufloaded(bufnr) && getbufvar(bufnr, '&filetype') ==# 'lean'
-    var windows = win_findbuf(bufnr)
-    if !empty(windows)
-      win_execute(windows[0], 'call lean#InfoviewOpen()')
+def RemoveMappings()
+  for [lhs, plug] in suggested_mappings
+    var mapping = maparg(lhs, 'n', false, true)
+    if !empty(mapping) && get(mapping, 'buffer', 0)
+        && get(mapping, 'rhs', '') ==# $'<Plug>({plug})'
+      execute $'silent! nunmap <buffer> {lhs}'
     endif
+  endfor
+  for [plug, command] in plug_commands
+    var lhs = $'<Plug>({plug})'
+    var mapping = maparg(lhs, 'n', false, true)
+    if !empty(mapping) && get(mapping, 'buffer', 0)
+        && get(mapping, 'rhs', '') ==# $'<Cmd>{command}<CR>'
+      execute $'silent! nunmap <buffer> {lhs}'
+    endif
+  endfor
+enddef
+
+def AutoOpen(bufnr: number, winid: number)
+  if bufloaded(bufnr) && getbufvar(bufnr, '&filetype') ==# 'lean'
+      && win_id2tabwin(winid)[0] > 0
+    var info = getwininfo(winid)
+    if !empty(info) && info[0].bufnr == bufnr
+      win_execute(winid, 'call lean#AutoOpenInfoview()')
+    endif
+  endif
+enddef
+
+export def AutoOpenInfoview()
+  if &filetype ==# 'lean' && !infoview.HasView()
+    infoview.Open(bufnr())
   endif
 enddef
 
 export def Attach(bufnr: number = bufnr())
   Init()
   if getbufvar(bufnr, 'lean_vim_attached', false)
+    # Re-entering a buffer is also an opportunity to recover from an exited
+    # server without reinstalling buffer-local hooks or mappings.
+    lsp.Attach(bufnr)
     return
   endif
   setbufvar(bufnr, 'lean_vim_attached', true)
@@ -98,14 +126,30 @@ export def Attach(bufnr: number = bufnr())
   execute $'autocmd TextChanged,TextChangedI <buffer={bufnr}> call lean#OnChanged({bufnr})'
   execute $'autocmd BufWritePost <buffer={bufnr}> call lean#OnSaved({bufnr})'
   execute $'autocmd CursorMoved,CursorMovedI <buffer={bufnr}> call lean#OnCursorMoved({bufnr})'
+  execute $'autocmd BufFilePost <buffer={bufnr}> call lean#OnFileRenamed({bufnr})'
   execute $'autocmd BufUnload <buffer={bufnr}> call lean#OnUnload({bufnr})'
   augroup END
 
   if config.Get().mappings
     UseSuggestedMappings()
   endif
-  if config.Get().infoview.autoopen
-    timer_start(0, (_) => AutoOpen(bufnr))
+  if config.Get().infoview.autoopen && !infoview.HasView()
+    var winid = win_getid()
+    timer_start(0, (_) => AutoOpen(bufnr, winid))
+  endif
+enddef
+
+export def OnBufWinEnter(bufnr: number)
+  if getbufvar(bufnr, '&filetype') !=# 'lean'
+    return
+  endif
+  Attach(bufnr)
+  if infoview.HasView()
+    infoview.Follow(bufnr, win_getid())
+  endif
+  if config.Get().infoview.autoopen && !infoview.HasView()
+    var winid = win_getid()
+    timer_start(0, (_) => AutoOpen(bufnr, winid))
   endif
 enddef
 
@@ -119,6 +163,11 @@ export def OnSaved(bufnr: number)
   infoview.ScheduleUpdate(bufnr)
 enddef
 
+export def OnFileRenamed(bufnr: number)
+  lsp.Attach(bufnr)
+  infoview.ScheduleUpdate(bufnr)
+enddef
+
 export def OnCursorMoved(bufnr: number)
   infoview.ScheduleUpdate(bufnr)
 enddef
@@ -127,10 +176,27 @@ export def OnUnload(bufnr: number)
   lsp.Detach(bufnr)
 enddef
 
-export def OnServerUpdate()
-  if &filetype ==# 'lean'
-    infoview.ScheduleUpdate(bufnr())
+export def Detach(bufnr: number = bufnr())
+  lsp.Detach(bufnr)
+  abbreviations.TeardownBuffer(bufnr)
+  var group = $'lean_vim_buffer_{bufnr}'
+  execute $'augroup {group}'
+  autocmd!
+  augroup END
+  if bufnr == bufnr()
+    RemoveMappings()
   endif
+  setbufvar(bufnr, 'lean_vim_attached', false)
+enddef
+
+export def OnTabClosed()
+  timer_start(0, (_) => infoview.PruneClosedTabs())
+enddef
+
+export def OnServerUpdate()
+  # Diagnostics and progress already arrived in local caches. Re-render those
+  # fields without issuing redundant goal and term-goal requests.
+  infoview.RefreshServerState()
 enddef
 
 export def SetupCommandWindow()
@@ -208,6 +274,7 @@ enddef
 
 export def RestartServer()
   lsp.RestartServer(bufnr())
+  infoview.ScheduleUpdate(bufnr())
 enddef
 
 export def Status()

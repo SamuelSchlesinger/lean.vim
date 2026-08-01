@@ -47,9 +47,9 @@ same UI substrate or a built-in LSP client.
 
 | Upstream behavior | Vim9 implementation | Status |
 |---|---|---|
-| Project/root detection | Parent marker walk and `.lake/packages` handling | Implemented |
+| Project/root detection | Parent markers, `.lake/packages`, core trees, and installed stdlib roots | Implemented |
 | `lake serve` / `lean --server` | Vim job with raw channel transport | Implemented |
-| LSP framing and lifecycle | Native Content-Length JSON-RPC parser, request table, server requests | Implemented |
+| LSP framing and lifecycle | Content-Length parser, cancellable requests, identity-safe restarts, graceful shutdown | Implemented |
 | Open/change/save/close sync | Versioned incremental changes with leading/trailing burst debounce and full-sync fallback | Implemented |
 | Restart current file | `didClose` + `didOpen` with `dependencyBuildMode = once` | Implemented |
 | Diagnostics | Signs, underlines, silent-goal filtering, line popup | Implemented |
@@ -59,11 +59,11 @@ same UI substrate or a built-in LSP client.
 | Persistent infoview | Cursor-following Vim split with goals, terms, diagnostics | Implemented |
 | Pins and diff pins | Persistent textual snapshots and line-oriented diffs | Implemented, simpler model |
 | Hover and navigation | LSP hover, definition, declaration, type definition | Implemented |
-| References and rename | Quickfix references and workspace-edit rename | Implemented |
-| Code actions | Selection plus workspace edit / execute-command support | Implemented |
+| References and rename | UTF-16-aware quickfix references plus preflighted text edits with rollback | Implemented |
+| Code actions | Selection, resolve, text edits, and execute-command support | Implemented |
 | Module hierarchy | Lean 4.22 requests displayed as a flat quickfix list | Implemented, simpler UI |
 | Unicode abbreviations | Full upstream data, Insert-mode conversion, reverse lookup | Implemented |
-| Syntax, indentation, snippets | Vim runtime files and VS Code snippet data | Implemented |
+| Syntax, indentation, snippets | Vim runtime files, Lean-aware indent expression, and VS Code snippet data | Implemented |
 | Matchit and switch.vim | Lean-aware buffer definitions when installed | Implemented |
 | Lean search paths | Core prefix plus `LEAN_SRC_PATH` from `lake env` | Implemented |
 

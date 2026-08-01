@@ -65,13 +65,15 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \ 'signs': {'enable': v:true},
         \ }
 <
-The lsp.command value is an argv List.  When empty, lake serve is selected for
-directories with a lakefile and lean --server for standalone files.
+The lsp.command value is an argv List, or a Funcref taking the project root and
+returning an argv List.  When empty, lake serve is selected for directories
+with a lakefile and lean --server for standalone files.
 The legacy infoview.update_delay name is accepted as an alias for
 infoview.update_cooldown.  A cooldown of zero disables cursor-update
 throttling.  lsp.change_delay is the trailing debounce for an edit burst;
 the first isolated edit is synchronized immediately.  Set it to zero to
 synchronize every reported edit without debouncing.
+The abbreviations.leader value must contain exactly one character.
 
 ===============================================================================
 4. Commands                                                *lean-vim9-commands*

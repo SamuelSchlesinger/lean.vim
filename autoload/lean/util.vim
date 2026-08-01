@@ -132,8 +132,15 @@ export def IncrementalChange(old_text: string, new_text: string): dict<any>
 enddef
 
 export def UriFromPath(path: string): string
-  var absolute = fnamemodify(path, ':p')
-  return 'file://' .. substitute(uri_encode(absolute), '%2F', '/', 'g')
+  var absolute = substitute(fnamemodify(path, ':p'), '\\', '/', 'g')
+  var encoded = substitute(uri_encode(absolute), '%2F', '/', 'g')
+  if absolute =~# '^\a:/'
+    encoded = substitute(encoded, '^\([A-Za-z]\)%3A', '\1:', '')
+    return 'file:///' .. encoded
+  elseif absolute =~# '^//'
+    return 'file:' .. encoded
+  endif
+  return 'file://' .. encoded
 enddef
 
 export def UriFromBuf(bufnr: number): string
@@ -144,7 +151,14 @@ export def PathFromUri(uri: string): string
   if uri !~# '^file://'
     return uri
   endif
-  var path = uri_decode(substitute(uri, '^file://', '', ''))
+  var encoded = strpart(uri, strlen('file://'))
+  if encoded =~? '^localhost/'
+    encoded = strpart(encoded, strlen('localhost'))
+  elseif encoded !~# '^/' && uri_decode(encoded) !~# '^\a:/'
+    # Preserve a non-empty authority as a UNC/network path.
+    encoded = '//' .. encoded
+  endif
+  var path = uri_decode(encoded)
   # file:///C:/... is the Windows spelling; strip the URI-only leading slash.
   if has('win32') && path =~# '^/[A-Za-z]:'
     path = path[1 :]
@@ -168,7 +182,7 @@ export def PositionParams(bufnr: number): dict<any>
 enddef
 
 export def ByteColumn(text: string, utf16_column: number): number
-  var byte_column = byteidx(text, utf16_column, true)
+  var byte_column = byteidx(text, max([0, utf16_column]), true)
   return byte_column < 0 ? strlen(text) : byte_column
 enddef
 
@@ -194,23 +208,69 @@ export def TextOffset(text: string, position: dict<any>): number
   return EditOffset(split(text, "\n", true), position)
 enddef
 
-def SetBufferText(bufnr: number, text: string)
+def SetBufferText(bufnr: number, text: string): bool
+  if !getbufvar(bufnr, '&modifiable')
+    return false
+  endif
+  var has_endofline = !empty(text) && text[-1] ==# "\n"
   var lines = split(text, "\n", true)
-  if !empty(lines) && lines[-1] ==# ''
+  if has_endofline && !empty(lines) && lines[-1] ==# ''
     remove(lines, -1)
   endif
   if empty(lines)
     lines = ['']
   endif
   var old_count = len(getbufline(bufnr, 1, '$'))
-  setbufline(bufnr, 1, lines)
-  if old_count > len(lines)
-    deletebufline(bufnr, len(lines) + 1, old_count)
+  if setbufline(bufnr, 1, lines) != 0
+    return false
   endif
+  if old_count > len(lines)
+      && deletebufline(bufnr, len(lines) + 1, old_count) != 0
+    return false
+  endif
+  setbufvar(bufnr, '&endofline', has_endofline)
+  return !!getbufvar(bufnr, '&endofline') == has_endofline
 enddef
 
-export def ApplyTextEdits(uri: string, edits: list<any>): bool
+def CheckedEditOffset(lines: list<string>, position: any): number
+  if type(position) != v:t_dict
+      || !has_key(position, 'line') || !has_key(position, 'character')
+      || type(position.line) != v:t_number || type(position.character) != v:t_number
+      || position.line < 0 || position.character < 0 || position.line >= len(lines)
+    return -1
+  endif
+  var line_text = lines[position.line]
+  var byte_column = ByteColumn(line_text, position.character)
+  # byteidx(..., true) rounds a position in the middle of a surrogate pair
+  # down to the code point. Reject that, and columns beyond the line, rather
+  # than silently applying an edit at a different LSP position.
+  if utf16idx(line_text, byte_column) != position.character
+    return -1
+  endif
+  return EditOffset(lines, position)
+enddef
+
+def EditsConflict(left: dict<any>, right: dict<any>): bool
+  var left_empty = left.start == left.finish
+  var right_empty = right.start == right.finish
+  if left_empty && right_empty
+    return false
+  elseif left_empty
+    return left.start >= right.start && left.start < right.finish
+  elseif right_empty
+    return right.start >= left.start && right.start < left.finish
+  endif
+  return max([left.start, right.start]) < min([left.finish, right.finish])
+enddef
+
+export def PrepareTextEdits(uri: string, edits: list<any>): dict<any>
   var path = PathFromUri(uri)
+  if empty(path)
+    return {ok: false}
+  endif
+  if empty(edits)
+    return {ok: true, changed: false}
+  endif
   var bufnr = bufnr(path)
   if bufnr < 0
     bufnr = bufadd(path)
@@ -218,26 +278,91 @@ export def ApplyTextEdits(uri: string, edits: list<any>): bool
   if !bufloaded(bufnr)
     bufload(bufnr)
   endif
+  if !bufloaded(bufnr)
+    return {ok: false}
+  endif
+  if !getbufvar(bufnr, '&modifiable')
+    return {ok: false}
+  endif
 
-  var lines = getbufline(bufnr, 1, '$')
-  var text = join(lines, "\n")
+  var text = BufText(bufnr)
+  var lines = split(text, "\n", true)
+  if empty(lines)
+    lines = ['']
+  endif
   var with_offsets: list<any> = []
+  var edit_index = 0
   for edit in edits
-    if !has_key(edit, 'range')
-      continue
+    if type(edit) != v:t_dict || !has_key(edit, 'range')
+        || type(edit.range) != v:t_dict
+        || type(get(edit, 'newText', v:null)) != v:t_string
+      return {ok: false}
+    endif
+    var start = CheckedEditOffset(lines, get(edit.range, 'start', v:null))
+    var finish = CheckedEditOffset(lines, get(edit.range, 'end', v:null))
+    if start < 0 || finish < start
+      return {ok: false}
     endif
     add(with_offsets, {
-      start: EditOffset(lines, edit.range.start),
-      finish: EditOffset(lines, edit.range.end),
-      text: get(edit, 'newText', ''),
+      start: start,
+      finish: finish,
+      text: edit.newText,
+      index: edit_index,
     })
+    edit_index += 1
   endfor
-  sort(with_offsets, (left, right) => right.start - left.start)
+  if len(with_offsets) > 1
+    for left_index in range(0, len(with_offsets) - 2)
+      for right_index in range(left_index + 1, len(with_offsets) - 1)
+        if EditsConflict(with_offsets[left_index], with_offsets[right_index])
+          return {ok: false}
+        endif
+      endfor
+    endfor
+  endif
+  # Apply from the end of the document. At an identical position, apply later
+  # array entries first so the resulting inserts retain their specified order.
+  sort(with_offsets, (left, right) => left.start == right.start
+    ? right.index - left.index
+    : right.start - left.start)
   for edit in with_offsets
     text = strpart(text, 0, edit.start) .. edit.text .. strpart(text, edit.finish)
   endfor
-  SetBufferText(bufnr, text)
-  return true
+  return {
+    ok: true,
+    bufnr: bufnr,
+    original: BufText(bufnr),
+    text: text,
+    changed: !empty(with_offsets),
+  }
+enddef
+
+export def ApplyPreparedTextEdits(prepared: dict<any>): bool
+  if !get(prepared, 'ok', false)
+    return false
+  endif
+  if !get(prepared, 'changed', false)
+    return true
+  endif
+  if !bufloaded(get(prepared, 'bufnr', -1))
+    return false
+  endif
+  if BufText(prepared.bufnr) !=# prepared.original
+    return false
+  endif
+  return SetBufferText(prepared.bufnr, prepared.text)
+enddef
+
+export def RestorePreparedTextEdits(prepared: dict<any>): bool
+  if !get(prepared, 'changed', false)
+    return true
+  endif
+  var bufnr = get(prepared, 'bufnr', -1)
+  return bufloaded(bufnr) && SetBufferText(bufnr, get(prepared, 'original', ''))
+enddef
+
+export def ApplyTextEdits(uri: string, edits: list<any>): bool
+  return ApplyPreparedTextEdits(PrepareTextEdits(uri, edits))
 enddef
 
 export def OpenLocation(location: any): bool
@@ -246,11 +371,27 @@ export def OpenLocation(location: any): bool
   endif
   var uri = get(location, 'uri', get(location, 'targetUri', ''))
   var range = get(location, 'range', get(location, 'targetSelectionRange', {}))
-  if empty(uri) || empty(range)
+  if type(uri) != v:t_string || empty(uri) || type(range) != v:t_dict
+      || type(get(range, 'start', v:null)) != v:t_dict
+      || type(get(range.start, 'line', v:null)) != v:t_number
+      || type(get(range.start, 'character', v:null)) != v:t_number
+      || range.start.line < 0 || range.start.character < 0
     return false
   endif
-  execute 'edit ' .. fnameescape(PathFromUri(uri))
+  var path = PathFromUri(uri)
+  if empty(path)
+    return false
+  endif
+  try
+    execute 'edit ' .. fnameescape(path)
+  catch
+    Notify($'cannot open Lean location: {v:exception}', 'ErrorMsg')
+    return false
+  endtry
   var target_line = range.start.line + 1
+  if target_line > line('$')
+    return false
+  endif
   var line_text = getline(target_line)
   var target_col = ByteColumn(line_text, range.start.character) + 1
   cursor(target_line, target_col)
@@ -263,7 +404,8 @@ export def MarkdownLines(contents: any): list<string>
   if type(contents) == v:t_string
     lines = split(contents, "\n", true)
   elseif type(contents) == v:t_dict
-    lines = split(get(contents, 'value', ''), "\n", true)
+    var value = get(contents, 'value', '')
+    lines = type(value) == v:t_string ? split(value, "\n", true) : []
   elseif type(contents) == v:t_list
     for item in contents
       if !empty(lines)

@@ -70,12 +70,12 @@ The main options are:
 |---|---:|---|
 | `mappings` | `v:false` | Enable the suggested buffer-local mappings |
 | `abbreviations.enable` | `v:true` | Expand Lean Unicode abbreviations |
-| `abbreviations.leader` | `\` | Prefix used for abbreviations |
+| `abbreviations.leader` | `\` | Single-character prefix used for abbreviations |
 | `infoview.autoopen` | `v:true` | Open the plain-text infoview for Lean buffers |
 | `infoview.orientation` | `auto` | `auto`, `vertical`, or `horizontal` |
 | `infoview.update_cooldown` | `50` | Throttle cursor-driven refreshes in milliseconds (`0` disables throttling) |
 | `lsp.enable` | `v:true` | Start the built-in Lean-specific LSP client |
-| `lsp.command` | `[]` | Override the server argv list |
+| `lsp.command` | `[]` | Override server argv, or supply a root-to-argv function |
 | `lsp.change_delay` | `50` | Trailing debounce for edit bursts; isolated edits flush immediately |
 | `progress_bars.enable` | `v:true` | Show processing ranges in the sign column |
 | `semantic_highlighting.enable` | `v:true` | Render LSP semantic tokens as text properties |
@@ -141,11 +141,12 @@ make test-live  # end-to-end check against the installed Lean server
 make license-check # verify pinned third-party files and required notices
 ```
 
-The fake server test covers split JSON-RPC frames, initialization, diagnostics,
-progress, goals, term goals, semantic tokens, UTF-16 incremental document
-changes, restart semantics, workspace edits, and Unicode abbreviation
-insertion. The live test checks goal retrieval and diagnostic updates against
-a real Lean process.
+The headless tests cover split JSON-RPC frames, initialization and graceful
+shutdown, request cancellation, diagnostics, progress, goals, term goals,
+semantic tokens, UTF-16 incremental changes, restart races, workspace-edit
+preflight, tab and ftplugin lifecycle, indentation, and Unicode
+abbreviation insertion. The live test checks goal retrieval, diagnostic
+updates, Lake startup, and search paths against real Lean processes.
 
 ## License
 

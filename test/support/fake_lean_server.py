@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import time
 from typing import Any, BinaryIO
 
 
@@ -13,6 +14,8 @@ stream_in: BinaryIO = sys.stdin.buffer
 stream_out: BinaryIO = sys.stdout.buffer
 log_path = pathlib.Path(sys.argv[1])
 sync_kind = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+initialize_delay = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
+emit_open_notifications = bool(int(sys.argv[4])) if len(sys.argv) > 4 else True
 
 
 def log(message: dict[str, Any]) -> None:
@@ -54,6 +57,8 @@ def response(request: dict[str, Any], result: Any) -> None:
 def handle_request(message: dict[str, Any]) -> None:
     method = message["method"]
     if method == "initialize":
+        if initialize_delay:
+            time.sleep(initialize_delay)
         response(
             message,
             {
@@ -71,11 +76,18 @@ def handle_request(message: dict[str, Any]) -> None:
             },
         )
     elif method == "$/lean/plainGoal":
+        uri = message["params"]["textDocument"]["uri"]
+        line = message["params"]["position"]["line"]
+        if (uri.endswith("/Editor.lean") or uri.endswith("/Basic.lean")) and line == 3:
+            time.sleep(0.1)
+        goals = ["case test\n⊢ Nat"]
+        if uri.endswith("/Editor.lean") and line == 1:
+            goals.append("case second\n⊢ Nat")
         response(
             message,
             {
                 "rendered": "case test\n⊢ Nat",
-                "goals": ["case test\n⊢ Nat"],
+                "goals": goals,
             },
         )
     elif method == "$/lean/plainTermGoal":
@@ -105,9 +117,27 @@ def handle_request(message: dict[str, Any]) -> None:
             },
         )
     elif method == "textDocument/references":
-        response(message, [])
+        response(
+            message,
+            [
+                {
+                    "uri": message["params"]["textDocument"]["uri"],
+                    "range": {
+                        "start": {"line": 0, "character": 6},
+                        "end": {"line": 0, "character": 12},
+                    },
+                }
+            ],
+        )
     elif method == "textDocument/codeAction":
         response(message, [])
+    elif method == "codeAction/resolve":
+        resolved = dict(message["params"])
+        resolved["command"] = {
+            "title": "resolved action",
+            "command": "fake.resolvedAction",
+        }
+        response(message, resolved)
     elif method == "$/lean/prepareModuleHierarchy":
         response(
             message,
@@ -131,6 +161,8 @@ def handle_request(message: dict[str, Any]) -> None:
 
 
 def opened(message: dict[str, Any]) -> None:
+    if not emit_open_notifications:
+        return
     document = message["params"]["textDocument"]
     uri = document["uri"]
     version = document["version"]
@@ -186,6 +218,33 @@ def opened(message: dict[str, Any]) -> None:
     )
 
 
+def changed(message: dict[str, Any]) -> None:
+    """Send a deliberately stale diagnostic to exercise client versioning."""
+    document = message["params"]["textDocument"]
+    version = document["version"]
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": document["uri"],
+                "version": version - 1,
+                "diagnostics": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 3},
+                        },
+                        "severity": 1,
+                        "source": "lean",
+                        "message": "stale warning",
+                    }
+                ],
+            },
+        }
+    )
+
+
 while True:
     incoming = read_message()
     if incoming is None:
@@ -202,7 +261,17 @@ while True:
                 "params": {"items": [{"section": "lean"}]},
             }
         )
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 901,
+                "method": "client/registerCapability",
+                "params": {"registrations": []},
+            }
+        )
     elif incoming.get("method") == "textDocument/didOpen":
         opened(incoming)
+    elif incoming.get("method") == "textDocument/didChange":
+        changed(incoming)
     elif incoming.get("method") == "exit":
         break
