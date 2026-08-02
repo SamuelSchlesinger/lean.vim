@@ -398,12 +398,15 @@ enddef
 
 export def InfoviewViewOptions()
   var cfg = config.Get().infoview
-  util.Popup('Lean infoview options', [
+  # A list literal continued across lines inside an imported-autoload call
+  # fails to compile (Vim 9.2 E697); bind the list first.
+  var lines = [
     $'orientation: {cfg.orientation}',
     $'auto-open: {cfg.autoopen}',
     $'show processing: {cfg.show_processing}',
     'ProofWidgets: unavailable in Vim; plain goals are enabled.',
-  ])
+  ]
+  util.Popup('Lean infoview options', lines)
 enddef
 
 export def InfoviewWidgets(_enabled: bool)

@@ -89,11 +89,15 @@ export def Search(query: string)
     util.Notify('Loogle needs curl on PATH', 'ErrorMsg')
     return
   endif
-  editor.RunCommandAsync([
+  # A list literal continued across lines inside an imported-autoload call
+  # fails to compile (Vim 9.2 E697); bind the list first.
+  var command = [
     'curl', '-s', '--max-time', '10', '-G',
     'https://loogle.lean-lang.org/json',
     '--data-urlencode', $'q={trimmed}',
-  ], getcwd(), (result) => OnResponse(trimmed, result))
+  ]
+  editor.RunCommandAsync(command, getcwd(),
+    (result) => OnResponse(trimmed, result))
 enddef
 
 defcompile
