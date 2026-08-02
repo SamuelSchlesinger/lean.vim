@@ -59,8 +59,9 @@ produce it.
 a busy elaborator never blocks your typing; results simply appear when
 ready. Navigate with `<C-n>`/`<C-p>`; the highlighted item's documentation
 loads into the preview popup on demand. Theorems are tagged `t` in the
-menu. `<C-x><C-o>` triggers completion manually, and
-`completion.autotrigger: v:false` turns the automatic popup off entirely.
+menu. `<C-x><C-o>` triggers completion (the default); set
+`completion.autotrigger: v:true` for an automatic as-you-type popup —
+each request costs the server real elaboration work, so it is opt-in.
 
 The two features are aware of each other: while you're mid-abbreviation,
 completion stays out of the way, so `\al<Tab>` always expands rather than
@@ -119,8 +120,10 @@ let g:lean_config = {'loogle': {'enable': v:true}}
 ## Managing the server
 
 - When the server reports "Imports are out of date", lean.vim restarts the
-  file for you (once per occurrence), which rebuilds and reloads the stale
-  imports; disable with `lsp.refresh_stale_imports`.
+  file for you once per buffer (the fresh-project case), which rebuilds and
+  reloads the stale imports; disable with `lsp.refresh_stale_imports`.
+  Later occurrences only show the diagnostic — deliberate, so saving a
+  module that others import cannot trigger background rebuild storms.
 - `:LeanRestartFile` (`<LocalLeader>r`) does the same by hand — useful when
   automatic refresh is off or a rebuild failed.
 - `:LeanRestartServer` restarts the project's server process.
@@ -145,8 +148,8 @@ let g:lean_config = {
       \ 'infoview': {'orientation': 'horizontal', 'no_goals_text': 'No goals.'},
       \ }
 
-" Manual-only completion, no automatic popup
-let g:lean_config = {'completion': {'autotrigger': v:false}}
+" As-you-type completion popup (manual <C-x><C-o> is the default)
+let g:lean_config = {'completion': {'autotrigger': v:true}}
 
 " Quieter UI: no inlay hints, no progress bars
 let g:lean_config = {

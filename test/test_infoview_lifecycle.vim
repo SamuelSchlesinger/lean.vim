@@ -12,12 +12,28 @@ runtime plugin/lean.vim
 filetype plugin indent on
 
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+set nowrap
 lean#InfoviewOpen()
 var first = lean#InfoviewState()
 assert_equal(bufnr(root .. '/test/fixtures/Basic.lean'), first.source_bufnr)
 assert_true(!empty(win_findbuf(first.bufnr)), 'first infoview was not visible')
 assert_true(has_key(get(first, 'line_targets', {}), '1'),
   'infoview render did not record the header jump target')
+
+# Long diagnostics must wrap in the infoview even when the user has global
+# 'nowrap', and the window-local options must survive a close/reopen because
+# the reused buffer gets a brand-new window each time.
+assert_true(getwinvar(bufwinid(first.bufnr), '&wrap'),
+  'infoview window did not enable wrap')
+lean#InfoviewClose()
+lean#InfoviewOpen()
+first = lean#InfoviewState()
+assert_true(getwinvar(bufwinid(first.bufnr), '&wrap'),
+  'reopened infoview window did not re-enable wrap')
+assert_true(getwinvar(bufwinid(first.bufnr), '&linebreak'),
+  'reopened infoview window did not re-enable linebreak')
+assert_true(getwinvar(bufwinid(first.bufnr), '&breakindent'),
+  'reopened infoview window did not re-enable breakindent')
 
 # BufWinEnter does not fire when moving between two already-visible splits.
 # The tab-local infoview must still follow whichever Lean window is active.

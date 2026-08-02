@@ -448,6 +448,34 @@ def changed(message: dict[str, Any]) -> None:
     """Send a deliberately stale diagnostic to exercise client versioning."""
     document = message["params"]["textDocument"]
     version = document["version"]
+    if "StaleImports" in document["uri"]:
+        # Imports went stale again after the automatic refresh, like saving
+        # a module that this file imports.
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": document["uri"],
+                    "version": version,
+                    "diagnostics": [
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1},
+                            },
+                            "severity": 1,
+                            "source": "lean",
+                            "message": (
+                                "Imports are out of date and must be rebuilt; "
+                                'use the "Restart File" command in your editor.'
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
+        return
     send(
         {
             "jsonrpc": "2.0",

@@ -82,7 +82,7 @@ The main options are:
 | `abbreviations.enable` | `v:true` | Expand Lean Unicode abbreviations |
 | `abbreviations.leader` | `\` | Single-character prefix used for abbreviations |
 | `completion.enable` | `v:true` | Install the LSP omnifunc for Lean buffers |
-| `completion.autotrigger` | `v:true` | As-you-type popup completion (identifier characters and `.`) |
+| `completion.autotrigger` | `v:false` | As-you-type popup completion (identifier characters and `.`); off by default to spare the server while typing |
 | `completion.set_completeopt` | `v:true` | Apply `completeopt=menuone,noinsert,noselect,popup` buffer-locally |
 | `inlay_hints.enable` | `v:true` | Render LSP inlay hints as virtual text over the visible range |
 | `infoview.autoopen` | `v:true` | Open the plain-text infoview for Lean buffers |

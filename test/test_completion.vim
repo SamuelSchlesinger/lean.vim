@@ -6,6 +6,7 @@ delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
 g:lean_config = {
+  completion: {autotrigger: true},
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
   lsp: {

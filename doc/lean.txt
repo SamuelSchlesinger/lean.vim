@@ -53,7 +53,7 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \ },
         \ 'completion': {
         \   'enable': v:true,
-        \   'autotrigger': v:true,
+        \   'autotrigger': v:false,
         \   'debounce': 100,
         \   'min_length': 1,
         \   'set_completeopt': v:true,
@@ -102,8 +102,11 @@ synchronize every reported edit without debouncing.
 When the server reports that a file's imports are out of date (a fresh
 project, or an imported module edited since its last build),
 lsp.refresh_stale_imports restarts the file automatically — once per
-occurrence — so the rebuilt imports are picked up without a manual
-:LeanRestartFile.  lsp.stderr echoes server stderr lines as they arrive;
+buffer, aimed at freshly opened projects — so the rebuilt imports are
+picked up without a manual :LeanRestartFile.  Later occurrences (for
+example while editing a module other files import) keep the diagnostic
+visible and leave the rebuild to an explicit :LeanRestartFile, so saves
+never trigger background rebuild storms.  lsp.stderr echoes server stderr lines as they arrive;
 it is off by default because lake's startup output would force
 press-Enter prompts.  The most recent stderr lines are always available
 via :LeanHealth.
@@ -201,9 +204,11 @@ With completion.set_completeopt (the default) 'completeopt' is set
 buffer-locally to menuone,noinsert,noselect,popup, which the popup flow
 expects.  Set it to v:false to manage the option yourself.
 
-Set completion.autotrigger to v:false for manual-only completion.  When
-Vim's built-in 'autocomplete' option is enabled, lean.vim's own auto-popup
-stands down automatically.
+Completion is manual by default: <C-x><C-o> queries the server.  Set
+completion.autotrigger to v:true for an as-you-type popup; it is off by
+default because every request costs real elaboration work in the server,
+which adds up while typing.  When Vim's built-in 'autocomplete' option is
+enabled, lean.vim's own auto-popup stands down automatically.
 
 While a Unicode abbreviation (for example \alpha) is being typed, completion
 is suppressed entirely so the two features cannot fight over <Tab> or the

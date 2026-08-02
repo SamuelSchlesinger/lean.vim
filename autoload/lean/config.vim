@@ -11,7 +11,7 @@ const DEFAULTS: dict<any> = {
   },
   completion: {
     enable: true,
-    autotrigger: true,
+    autotrigger: false,
     debounce: 100,
     min_length: 1,
     set_completeopt: true,

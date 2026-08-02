@@ -17,6 +17,9 @@ g:lean_config = {
 
 runtime plugin/lean.vim
 filetype plugin indent on
+# Scenario 1 leaves its buffer modified; switching to scenario 2 must not
+# trip E37.
+set hidden
 
 def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
   var elapsed = 0
@@ -54,6 +57,17 @@ assert_equal(1, CountFor('textDocument/didClose', 'StaleImportsFixed'),
   'automatic restart did not close the document first')
 assert_true(WaitFor(() => empty(lean#lsp#Diagnostics(fixed_uri))),
   'diagnostics did not clear after the automatic restart')
+
+# Imports going stale again later (an imported module was edited or saved)
+# must not restart the file a second time: that would turn every such save
+# into a background rebuild.  The diagnostic alone is the signal.
+setline(3, 'def more : Nat := 3')
+lean#OnChanged(bufnr())
+assert_true(WaitFor(() => !empty(lean#lsp#Diagnostics(fixed_uri))),
+  'the reappearing stale diagnostic was not published')
+sleep 200m
+assert_equal(2, CountFor('textDocument/didOpen', 'StaleImportsFixed'),
+  'a reappearing stale report restarted the file again')
 
 # A server that keeps reporting stale imports gets exactly one automatic
 # restart, not a reopen loop.

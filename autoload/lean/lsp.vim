@@ -1031,8 +1031,12 @@ enddef
 
 # A stale-imports diagnostic means imports were rebuilt (or will be by lake
 # on reopen); restarting the file is exactly the remedy the message asks the
-# user for.  One automatic restart per episode: the flag only clears when
-# the diagnostic does, so a build that stays broken is not reopened in a loop.
+# user for.  One automatic restart per buffer lifetime, aimed at the
+# freshly-opened-project case: re-arming when the message clears would turn
+# every save of an imported module into a rebuild-and-re-elaborate storm
+# across the buffers that import it.  The flag resets when the buffer is
+# closed (ClearUriState); afterwards the diagnostic stays visible and
+# :LeanRestartFile remains the manual remedy.
 def MaybeRefreshStaleImports(uri: string, diagnostics: list<any>)
   var stale = false
   for diagnostic in diagnostics
@@ -1044,9 +1048,6 @@ def MaybeRefreshStaleImports(uri: string, diagnostics: list<any>)
     endif
   endfor
   if !stale
-    if has_key(stale_import_refreshed, uri)
-      remove(stale_import_refreshed, uri)
-    endif
     return
   endif
   if !config.Get().lsp.refresh_stale_imports

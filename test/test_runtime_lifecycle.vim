@@ -4,6 +4,7 @@ var root = fnamemodify(expand('<sfile>'), ':p:h:h')
 execute 'set runtimepath^=' .. fnameescape(root)
 g:lean_config = {
   mappings: true,
+  completion: {autotrigger: true},
   infoview: {autoopen: false},
   lsp: {enable: false},
 }
