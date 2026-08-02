@@ -42,7 +42,8 @@ const DEFAULTS: dict<any> = {
     command: [],
     change_delay: 50,
     root_markers: ['lakefile.toml', 'lakefile.lean', 'lean-toolchain', '.git'],
-    stderr: true,
+    refresh_stale_imports: true,
+    stderr: false,
   },
   progress_bars: {
     enable: true,

@@ -83,7 +83,8 @@ Set g:lean_config before the plugin loads.  All keys are optional. >
         \   'change_delay': 50,
         \   'root_markers': ['lakefile.toml', 'lakefile.lean',
         \                    'lean-toolchain', '.git'],
-        \   'stderr': v:true,
+        \   'refresh_stale_imports': v:true,
+        \   'stderr': v:false,
         \ },
         \ 'progress_bars': {'enable': v:true, 'character': '│'},
         \ 'semantic_highlighting': {'enable': v:true, 'links': {}},
@@ -98,6 +99,14 @@ infoview.update_cooldown.  A cooldown of zero disables cursor-update
 throttling.  lsp.change_delay is the trailing debounce for an edit burst;
 the first isolated edit is synchronized immediately.  Set it to zero to
 synchronize every reported edit without debouncing.
+When the server reports that a file's imports are out of date (a fresh
+project, or an imported module edited since its last build),
+lsp.refresh_stale_imports restarts the file automatically — once per
+occurrence — so the rebuilt imports are picked up without a manual
+:LeanRestartFile.  lsp.stderr echoes server stderr lines as they arrive;
+it is off by default because lake's startup output would force
+press-Enter prompts.  The most recent stderr lines are always available
+via :LeanHealth.
 The abbreviations.leader value must contain exactly one character.
 inlay_hints.margin is the number of off-screen lines around the visible area
 that are also requested; hints follow scrolling automatically.

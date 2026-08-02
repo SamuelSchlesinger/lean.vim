@@ -55,6 +55,7 @@ def response(request: dict[str, Any], result: Any) -> None:
 
 
 last_opened_uri = ""
+open_counts: dict[str, int] = {}
 
 
 def message_uri_fallback(message: dict[str, Any]) -> str:
@@ -339,6 +340,36 @@ def opened(message: dict[str, Any]) -> None:
         return
     uri = document["uri"]
     version = document["version"]
+    if "StaleImports" in uri:
+        # Lean's watchdog reports stale imports on the file's first line.
+        # "Fixed" clears on reopen (imports were rebuilt); "Broken" reports
+        # stale on every open, like a build that keeps failing.
+        open_counts[uri] = open_counts.get(uri, 0) + 1
+        stale = "Broken" in uri or open_counts[uri] == 1
+        diagnostics = []
+        if stale:
+            diagnostics = [
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                    "severity": 1,
+                    "source": "lean",
+                    "message": (
+                        "Imports are out of date and must be rebuilt; "
+                        'use the "Restart File" command in your editor.'
+                    ),
+                }
+            ]
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {"uri": uri, "version": version, "diagnostics": diagnostics},
+            }
+        )
+        return
     if "Progress" in uri:
         # Whole-file processing, like Lean's first fileProgress notification.
         line_count = document.get("text", "").count("\n") + 1

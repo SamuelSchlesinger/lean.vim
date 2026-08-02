@@ -118,8 +118,11 @@ let g:lean_config = {'loogle': {'enable': v:true}}
 
 ## Managing the server
 
-- `:LeanRestartFile` (`<LocalLeader>r`) re-elaborates the current file and
-  rebuilds stale dependencies — the usual fix after editing an import.
+- When the server reports "Imports are out of date", lean.vim restarts the
+  file for you (once per occurrence), which rebuilds and reloads the stale
+  imports; disable with `lsp.refresh_stale_imports`.
+- `:LeanRestartFile` (`<LocalLeader>r`) does the same by hand — useful when
+  automatic refresh is off or a rebuild failed.
 - `:LeanRestartServer` restarts the project's server process.
 - If the server can't start (toolchain missing, broken project), lean.vim
   reports it once and backs off instead of retrying on every window switch;

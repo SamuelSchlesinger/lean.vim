@@ -14,6 +14,7 @@ var change_timers: dict<any> = {}
 var last_change_flush_ms: dict<float> = {}
 var diagnostics_by_uri: dict<any> = {}
 var progress_by_uri: dict<any> = {}
+var stale_import_refreshed: dict<bool> = {}
 var bufnr_by_uri: dict<number> = {}
 var failed_since_ms: dict<float> = {}
 var progress_timers: dict<number> = {}
@@ -797,6 +798,9 @@ def ClearUriState(uri: string)
   if has_key(progress_by_uri, uri)
     remove(progress_by_uri, uri)
   endif
+  if has_key(stale_import_refreshed, uri)
+    remove(stale_import_refreshed, uri)
+  endif
 enddef
 
 def ClearBufferDecorations(server: dict<any>, bufnr: number, clear_state: bool = false)
@@ -1025,6 +1029,39 @@ def OwnsUri(server: dict<any>, uri: string): bool
   return index(values(get(server, 'opened', {})), uri) >= 0
 enddef
 
+# A stale-imports diagnostic means imports were rebuilt (or will be by lake
+# on reopen); restarting the file is exactly the remedy the message asks the
+# user for.  One automatic restart per episode: the flag only clears when
+# the diagnostic does, so a build that stays broken is not reopened in a loop.
+def MaybeRefreshStaleImports(uri: string, diagnostics: list<any>)
+  var stale = false
+  for diagnostic in diagnostics
+    if type(diagnostic) == v:t_dict
+        && type(get(diagnostic, 'message', v:null)) == v:t_string
+        && diagnostic.message =~? '^imports are out of date'
+      stale = true
+      break
+    endif
+  endfor
+  if !stale
+    if has_key(stale_import_refreshed, uri)
+      remove(stale_import_refreshed, uri)
+    endif
+    return
+  endif
+  if !config.Get().lsp.refresh_stale_imports
+      || has_key(stale_import_refreshed, uri)
+    return
+  endif
+  stale_import_refreshed[uri] = true
+  var bufnr = BufnrForUri(uri)
+  if bufnr < 0 || !bufloaded(bufnr)
+    return
+  endif
+  AddHistory($'imports out of date for {uri}; restarting the file')
+  timer_start(0, (_) => RestartFile(bufnr))
+enddef
+
 def HandleNotification(server: dict<any>, message: dict<any>)
   var method = message.method
   var params = get(message, 'params', {})
@@ -1044,6 +1081,7 @@ def HandleNotification(server: dict<any>, message: dict<any>)
     endif
     diagnostics_by_uri[params.uri] = diagnostics
     RenderDiagnostics(params.uri, diagnostics_by_uri[params.uri])
+    MaybeRefreshStaleImports(params.uri, diagnostics_by_uri[params.uri])
     silent doautocmd <nomodeline> User LeanDiagnosticsUpdate
   elseif method ==# '$/lean/fileProgress'
     if type(params) != v:t_dict

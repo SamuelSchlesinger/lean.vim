@@ -13,6 +13,7 @@ test: license-check
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_request_queue.vim
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_runtime_lifecycle.vim
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_full_sync.vim
+	vim -Nu NONE -i NONE -n -es -V1 -S test/test_stale_imports.vim
 	vim -Nu NONE -i NONE -n -es -V1 -S test/test_util.vim
 
 test-live:
