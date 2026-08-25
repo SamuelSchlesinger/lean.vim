@@ -62,7 +62,7 @@ export def Report()
       add(pending_tools, tool)
     else
       add(lines, $'  - {tool}: not found on PATH'
-        .. (tool ==# 'curl' ? ' (only needed for :LeanLoogle)' : ''))
+        .. (tool ==# 'curl' ? ' (only needed for Loogle commands)' : ''))
     endif
   endfor
 

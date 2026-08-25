@@ -107,8 +107,10 @@ fighting a popup for the Tab key.
 ## Searching Mathlib
 
 `:LeanLoogle {pattern}` queries [loogle.lean-lang.org](https://loogle.lean-lang.org)
-and shows `name : type — module` results in a scratch buffer. It is the
-plugin's only network feature and ships disabled; enable it with:
+and shows `name : type — module` results in a scratch buffer. Use
+`:LeanLooglePopup` from a normal-mode mapping to enter the pattern in a prompt
+instead. Loogle is the plugin's only network feature and ships disabled;
+enable it with:
 
 ```vim
 let g:lean_config = {'loogle': {'enable': v:true}}

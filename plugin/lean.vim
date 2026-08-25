@@ -39,6 +39,7 @@ command! LeanOutline call lean#Outline()
 command! -nargs=? LeanWorkspaceSymbols call lean#WorkspaceSymbols(<q-args>)
 command! LeanHealth call lean#Health()
 command! -nargs=+ LeanLoogle call lean#Loogle(<q-args>)
+command! LeanLooglePopup call lean#LooglePopup()
 
 command! LeanInfoviewOpen call lean#InfoviewOpen()
 command! LeanInfoviewClose call lean#InfoviewClose()

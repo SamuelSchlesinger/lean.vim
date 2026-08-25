@@ -100,4 +100,28 @@ export def Search(query: string)
     (result) => OnResponse(trimmed, result))
 enddef
 
+# Prompt separately from :LeanLoogle so a normal-mode mapping can collect a
+# query after the mapping has completed instead of embedding it in Ex input.
+export def Popup()
+  if !config.Get().loogle.enable
+    util.Notify('Loogle is disabled; enable it with g:lean_config = {"loogle": {"enable": v:true}}')
+    return
+  endif
+  if !executable('curl')
+    util.Notify('Loogle needs curl on PATH', 'ErrorMsg')
+    return
+  endif
+
+  var query = ''
+  inputsave()
+  try
+    query = inputdialog('Loogle search: ')
+  finally
+    inputrestore()
+  endtry
+  if !empty(trim(query))
+    Search(query)
+  endif
+enddef
+
 defcompile

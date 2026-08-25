@@ -89,7 +89,7 @@ The main options are:
 | `infoview.orientation` | `auto` | `auto`, `vertical`, or `horizontal` |
 | `infoview.update_cooldown` | `50` | Throttle cursor-driven refreshes in milliseconds (`0` disables throttling) |
 | `infoview.no_goals_text` | `Goals accomplished 🎉` | Text shown when the goal list is empty |
-| `loogle.enable` | `v:false` | Allow `:LeanLoogle` to query loogle.lean-lang.org (the only network feature) |
+| `loogle.enable` | `v:false` | Allow the Loogle commands to query loogle.lean-lang.org (the only network feature) |
 | `lsp.enable` | `v:true` | Start the built-in Lean-specific LSP client |
 | `lsp.command` | `[]` | Override server argv, or supply a root-to-argv function |
 | `lsp.change_delay` | `50` | Trailing debounce for edit bursts; isolated edits flush immediately |
@@ -135,7 +135,8 @@ The most useful commands are:
 - `:LeanDefinition`, `:LeanDeclaration`, `:LeanReferences`, `:LeanRename`
 - `:LeanCodeAction`, `:LeanSorryFill`, `:LeanOutline`, `:LeanWorkspaceSymbols`
 - `:LeanModuleImports`, `:LeanModuleImportedBy`, `:LeanSearchPaths`
-- `:LeanInlayHintsToggle`, `:LeanLoogle` (opt-in), `:LeanAbbreviationsReverseLookup`
+- `:LeanInlayHintsToggle`, `:LeanLoogle` / `:LeanLooglePopup` (opt-in),
+  `:LeanAbbreviationsReverseLookup`
 
 Completion works out of the box: identifiers and dot-completion pop up as you
 type (asynchronously — a busy elaborator never blocks typing), `<C-x><C-o>`
@@ -175,7 +176,7 @@ Where lean.vim goes its own way:
   decorate only the visible range and follow scrolling, and a failed server
   start backs off instead of retrying on every window switch.
 - **Additions without an upstream equivalent**: `:LeanHealth`, a
-  Telescope-free opt-in `:LeanLoogle`, and `lean#StatuslineProgress()`.
+  Telescope-free opt-in Loogle commands, and `lean#StatuslineProgress()`.
 
 Where lean.nvim remains ahead — deliberately not emulated here:
 

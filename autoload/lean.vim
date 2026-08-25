@@ -268,6 +268,10 @@ export def Loogle(query: string)
   loogle.Search(query)
 enddef
 
+export def LooglePopup()
+  loogle.Popup()
+enddef
+
 # For 'statusline' via %{lean#StatuslineProgress()}: elaboration percent and
 # diagnostic counts for attached Lean buffers, an empty string elsewhere.
 export def StatuslineProgress(): string

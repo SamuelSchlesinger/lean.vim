@@ -30,7 +30,7 @@ Requirements:
     +vim9script +job +channel +popupwin +textprop +signs
     (the plugin checks at startup and reports missing pieces clearly)
   - Lean 4 and, for Lake projects, lake on $PATH
-  - curl on $PATH only for the optional :LeanLoogle command
+  - curl on $PATH only for the optional Loogle commands
 
 Run |:LeanHealth| for a report on all of the above.
 
@@ -116,7 +116,7 @@ that are also requested; hints follow scrolling automatically.
 infoview.no_goals_text is rendered when the goal list is empty; set it to
 'No goals.' for the plainer message.
 loogle.enable gates the only network feature; nothing is ever sent unless it
-is enabled and :LeanLoogle is invoked explicitly.
+is enabled and a Loogle command is invoked explicitly.
 
 Lean's server reports keyword, function, variable, and property semantic
 tokens.  Variables and property projections (like move.origin.col) cover
@@ -187,6 +187,7 @@ Server and editor:~
   :LeanLoogle {pattern}       Search loogle.lean-lang.org (needs
                               loogle.enable and curl; see
                               |lean-vim9-configuration|).
+  :LeanLooglePopup            Prompt for a Loogle pattern, then search.
   :LeanAbbreviationsReverseLookup
                               Show abbreviations for the current symbol.
 

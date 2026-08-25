@@ -251,6 +251,33 @@ lean#Loogle('Nat.succ')
 assert_match('Loogle is disabled', execute('messages'),
   ':LeanLoogle did not explain the opt-in flag while disabled')
 
+# The popup command prompts from a mapping, then delegates the entered query
+# to the same async search path. A temporary curl keeps this test offline.
+var fake_bin = tempname()
+mkdir(fake_bin)
+var fake_curl = fake_bin .. '/curl'
+writefile([
+  '#!/bin/sh',
+  'printf ''%s\n'' ''{"hits":[{"name":"Nat.succ","type":"Nat → Nat","module":"Init.Prelude"}]}''',
+], fake_curl)
+setfperm(fake_curl, 'rwxr-xr-x')
+var saved_path = $PATH
+$PATH = fake_bin .. ':' .. saved_path
+g:lean_config['loogle'] = {enable: true}
+lean#config#Reset()
+timer_start(10, (_) => feedkeys("Nat.succ\<CR>", 'nt'))
+nnoremap <buffer> ,l <Cmd>LeanLooglePopup<CR>
+feedkeys(',l', 'xt')
+nunmap <buffer> ,l
+assert_true(WaitFor(() => getline(1) ==# 'Loogle: Nat.succ'),
+  ':LeanLooglePopup did not submit the prompted query')
+assert_match('Nat.succ : Nat → Nat', getline(3),
+  ':LeanLooglePopup did not render the search result')
+close
+$PATH = saved_path
+delete(fake_curl)
+delete(fake_bin, 'd')
+
 # :LeanHealth renders a self-contained report.
 lean#Health()
 assert_match('lean.vim health', getline(1), ':LeanHealth did not open its report')
