@@ -166,28 +166,38 @@ export def PathFromUri(uri: string): string
   return path
 enddef
 
-# 1-based [first, last] union of the line ranges every window showing the
-# buffer displays, widened by margin, or [] when the buffer is hidden.
-export def VisibleLineSpan(bufnr: number, margin: number): list<number>
-  var first = -1
-  var last = -1
-  for winid in win_findbuf(bufnr)
-    var info = getwininfo(winid)
-    if empty(info)
-      continue
-    endif
-    if first < 0 || info[0].topline < first
-      first = info[0].topline
-    endif
-    if info[0].botline > last
-      last = info[0].botline
-    endif
-  endfor
-  if first < 0
+# Disjoint 1-based [first, last] ranges displayed by actual windows, widened
+# by margin. Distant splits must not turn the invisible gap into visible work.
+export def VisibleLineRanges(bufnr: number, margin: number): list<list<number>>
+  var ranges: list<list<number>> = []
+  var buffers = getbufinfo(bufnr)
+  if empty(buffers)
     return []
   endif
-  var line_count = len(getbufline(bufnr, 1, '$'))
-  return [max([1, first - margin]), min([line_count, last + margin])]
+  var line_count = buffers[0].linecount
+  for winid in win_findbuf(bufnr)
+    var info = getwininfo(winid)
+    if empty(info) || win_gettype(winid) ==# 'autocmd'
+      continue
+    endif
+    add(ranges, [max([1, info[0].topline - margin]),
+      min([line_count, max([info[0].topline, info[0].botline]) + margin])])
+  endfor
+  sort(ranges, (left, right) => left[0] - right[0])
+  var merged: list<list<number>> = []
+  for span in ranges
+    if !empty(merged) && span[0] <= merged[-1][1] + 1
+      merged[-1][1] = max([merged[-1][1], span[1]])
+    else
+      add(merged, span)
+    endif
+  endfor
+  return merged
+enddef
+
+export def VisibleLineSpan(bufnr: number, margin: number): list<number>
+  var ranges = VisibleLineRanges(bufnr, margin)
+  return empty(ranges) ? [] : [ranges[0][0], ranges[-1][1]]
 enddef
 
 # bufnr({name}) treats its argument as a file pattern, so a path containing
@@ -219,6 +229,17 @@ export def PositionParams(bufnr: number): dict<any>
     textDocument: {uri: UriFromBuf(bufnr)},
     position: Position(bufnr),
   }
+enddef
+
+export def CursorContext(): dict<any>
+  return {bufnr: bufnr(), winid: win_getid(), name: bufname(),
+    tick: b:changedtick, cursor: getcurpos()[1 : 2]}
+enddef
+
+export def ContextIsCurrent(context: dict<any>, check_cursor: bool = true): bool
+  return bufnr() == context.bufnr && win_getid() == context.winid
+    && bufname() ==# context.name && b:changedtick == context.tick
+    && (!check_cursor || getcurpos()[1 : 2] == context.cursor)
 enddef
 
 export def ByteColumn(text: string, utf16_column: number): number
@@ -293,36 +314,17 @@ def EditsConflict(left: dict<any>, right: dict<any>): bool
   if left_empty && right_empty
     return false
   elseif left_empty
-    return left.start >= right.start && left.start < right.finish
+    return left.start > right.start && left.start < right.finish
+      || (left.start == right.start && left.index > right.index)
   elseif right_empty
-    return right.start >= left.start && right.start < left.finish
+    return right.start > left.start && right.start < left.finish
+      || (right.start == left.start && right.index > left.index)
   endif
   return max([left.start, right.start]) < min([left.finish, right.finish])
 enddef
 
-export def PrepareTextEdits(uri: string, edits: list<any>): dict<any>
-  var path = PathFromUri(uri)
-  if empty(path)
-    return {ok: false}
-  endif
-  if empty(edits)
-    return {ok: true, changed: false}
-  endif
-  var bufnr = FindBuffer(path)
-  if bufnr < 0
-    bufnr = bufadd(path)
-  endif
-  if !bufloaded(bufnr)
-    bufload(bufnr)
-  endif
-  if !bufloaded(bufnr)
-    return {ok: false}
-  endif
-  if !getbufvar(bufnr, '&modifiable')
-    return {ok: false}
-  endif
-
-  var text = BufText(bufnr)
+export def EditText(original: string, edits: list<any>): dict<any>
+  var text = original
   var lines = split(text, "\n", true)
   if empty(lines)
     lines = ['']
@@ -365,12 +367,50 @@ export def PrepareTextEdits(uri: string, edits: list<any>): dict<any>
   for edit in with_offsets
     text = strpart(text, 0, edit.start) .. edit.text .. strpart(text, edit.finish)
   endfor
+  return {ok: true, text: text}
+enddef
+
+export def PrepareTextEdits(uri: string, edits: list<any>): dict<any>
+  # The client owns file buffers only. Other URI schemes must not be handed
+  # to bufload(), where unrelated file handlers could interpret them.
+  if uri !~# '^file://'
+    return {ok: false}
+  endif
+  var path = PathFromUri(uri)
+  if empty(path)
+    return {ok: false}
+  endif
+  if empty(edits)
+    return {ok: true, changed: false}
+  endif
+  var bufnr = FindBuffer(path)
+  if bufnr < 0
+    if !filereadable(path)
+      return {ok: false}
+    endif
+    bufnr = bufadd(path)
+  endif
+  try
+    if !bufloaded(bufnr)
+      bufload(bufnr)
+    endif
+  catch
+    return {ok: false}
+  endtry
+  if !bufloaded(bufnr) || !getbufvar(bufnr, '&modifiable')
+    return {ok: false}
+  endif
+  var original = BufText(bufnr)
+  var result = EditText(original, edits)
+  if !result.ok
+    return result
+  endif
   return {
     ok: true,
     bufnr: bufnr,
-    original: BufText(bufnr),
-    text: text,
-    changed: !empty(with_offsets),
+    original: original,
+    text: result.text,
+    changed: result.text !=# original,
   }
 enddef
 

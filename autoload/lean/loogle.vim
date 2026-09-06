@@ -50,7 +50,7 @@ def RenderResults(query: string, parsed: dict<any>)
     add(lines, 'No results.')
   endif
   for hit in parsed.hits
-    add(lines, empty(hit.type) ? hit.name : $'{hit.name} : {hit.type}')
+    extend(lines, split(empty(hit.type) ? hit.name : $'{hit.name} : {hit.type}', "\n", true))
     if !empty(hit.module)
       add(lines, $'  -- {hit.module}')
     endif
@@ -64,7 +64,8 @@ enddef
 
 def OnResponse(query: string, result: dict<any>)
   if result.status != 0
-    util.Notify($'Loogle query failed (curl exit {result.status})', 'ErrorMsg')
+    var detail = empty(result.stderr) ? '' : ': ' .. result.stderr[0]
+    util.Notify($'Loogle query failed (curl exit {result.status}){detail}', 'ErrorMsg')
     return
   endif
   var parsed = ParseResponse(join(result.stdout, "\n"))
@@ -92,7 +93,7 @@ export def Search(query: string)
   # A list literal continued across lines inside an imported-autoload call
   # fails to compile (Vim 9.2 E697); bind the list first.
   var command = [
-    'curl', '-s', '--max-time', '10', '-G',
+    'curl', '--silent', '--show-error', '--fail', '--max-time', '10', '-G',
     'https://loogle.lean-lang.org/json',
     '--data-urlencode', $'q={trimmed}',
   ]

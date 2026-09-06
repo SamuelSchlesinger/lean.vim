@@ -6,7 +6,6 @@ delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
 g:lean_config = {
-  completion: {autotrigger: true},
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
   lsp: {
@@ -121,6 +120,64 @@ DriveInsert("2G$a\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'manual omni completion never opened the pum')
 assert_equal('-- abcγδ', getline(2), 'reaching-back textEdit was not honored')
 
+# Default manual completion must install the same resolve and cleanup hooks.
+DriveInsert("5GA s\<C-x>\<C-o>", "\<C-n>", 'resolve')
+assert_match('resolved documentation', pum_poll.popup_text,
+  'manual completion did not resolve documentation with default settings')
+assert_equal('def four := 4 succ', getline(5))
+var manual_resolves = len(RpcMessages('completionItem/resolve'))
+
+# Replacement ends, filtering text, and different item ranges must all be
+# honored. The popup is requested between "abc" and "TAIL".
+append(6, repeat(['-- abcTAIL!!'], 5))
+DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
+assert_true(pum_poll.fired, 'filterText did not make the completion visible')
+assert_equal('-- replacement!!', getline(7), 'completion left its replacement suffix behind')
+assert_equal([7, strlen('-- replacement')], [line('.'), col('.')])
+DriveInsert("8G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
+assert_equal('-- insertedTAIL!!', getline(8), 'InsertReplaceEdit did not use its insert range')
+DriveInsert("10G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
+assert_equal('-- differentTAIL!!', getline(10), 'label replaced the differing insertText')
+DriveInsert("11G06li\<C-x>\<C-o>", "\<C-n>\<C-n>\<C-y>\<Esc>")
+assert_equal('replacement!!', getline(11), 'the selected item did not use its own edit range')
+DriveInsert("9G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
+assert_equal('-- imported', getline(1), 'completion did not apply additionalTextEdits')
+assert_equal(['-- first', 'second!!'], getline(10, 11), 'multiline completion was not inserted')
+assert_equal([11, 6], [line('.'), col('.')], 'completion cursor ignored edits before the insertion')
+normal! u
+assert_equal('-- abcTAIL!!', getline(9), 'one undo did not restore the completion source')
+assert_equal('def one := 1', getline(1), 'one undo did not revert additional edits')
+
+# A selected completion also commits correctly when followed by a space;
+# cancelling the popup must preserve the original word and suffix.
+setline(7, '-- abcTAIL!!')
+DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n> \<Esc>")
+assert_equal('-- replacement !!', getline(7), 'typing a space did not commit the actual edit')
+setline(7, '-- abcTAIL!!')
+DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n>\<C-e>\<Esc>")
+assert_equal('-- abcTAIL!!', getline(7), 'cancelling completion changed the text')
+
+# Leaving Insert mode cancels a slow manually requested completion too.
+var cancel_count = len(RpcMessages('$/cancelRequest'))
+timer_start(100, (_) => feedkeys("\<Esc>", 'nt'))
+feedkeys("4GA s\<C-x>\<C-o>", 'xt!')
+sleep 450m
+assert_true(len(RpcMessages('$/cancelRequest')) > cancel_count,
+  'leaving Insert mode did not cancel manual completion')
+
+# Only explicit completion requests are allowed with the default settings.
+var manual_requests = len(CompletionRequests())
+feedkeys("1GA x\<Esc>", 'xt')
+sleep 150m
+assert_equal(manual_requests, len(CompletionRequests()),
+  'manual completion enabled as-you-type requests')
+
+# The automatic flow below exercises the opt-in configuration separately.
+edit!
+g:lean_config['completion'] = {autotrigger: true}
+lean#config#Reset()
+lean#completion#SetupBuffer(bufnr())
+
 # 2. Auto-popup fires on typed identifier characters.
 DriveInsert("1GA s", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'auto-popup did not open after an identifier character')
@@ -145,8 +202,8 @@ assert_true(pum_poll.fired, 'auto-popup did not open for the resolve test')
 assert_match('resolved documentation', pum_poll.popup_text,
   'resolved documentation never reached the info popup')
 var resolves = RpcMessages('completionItem/resolve')
-assert_equal(1, len(resolves), 'selecting one item did not resolve exactly once')
-assert_equal('succ', get(get(resolves[0], 'params', {}), 'label', ''),
+assert_equal(manual_resolves + 1, len(resolves), 'selecting one item did not resolve exactly once')
+assert_equal('succ', get(get(resolves[-1], 'params', {}), 'label', ''),
   'the wrong item was resolved')
 assert_equal('def four := 4 succ', getline(5), 'resolve test accepted the wrong item')
 

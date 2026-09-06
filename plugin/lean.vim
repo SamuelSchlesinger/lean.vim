@@ -9,11 +9,12 @@ g:loaded_lean_vim9 = 1
 # (late 9.1 patch levels also carry them); without them the modules below
 # abort compilation with bare E117 errors. Refuse loudly once instead.
 if !has('job') || !has('channel') || !has('popupwin') || !has('textprop')
+    || !has('signs') || !has('timers')
     || !exists('*uri_encode') || !exists('*uri_decode')
     || !exists('*utf16idx') || !exists('*indexof') || !exists('*prop_add_list')
   g:lean_vim9_unsupported = 1
   echomsg 'lean.vim requires Vim 9.2 (or a late Vim 9.1 with uri_encode())'
-    .. ' built with +job, +channel, +popupwin, and +textprop'
+    .. ' built with +job, +channel, +popupwin, +textprop, +signs, and +timers'
   finish
 endif
 

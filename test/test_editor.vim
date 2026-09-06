@@ -55,6 +55,25 @@ assert_equal(10, getqflist()[0].col, 'reference UTF-16 column was used as a byte
 assert_equal('-- α😊target', getqflist()[0].text, 'reference quickfix item omitted source context')
 cclose
 
+# Delayed navigation, hover, and outline replies belong to the requesting
+# window. They must not modify a window visited while Lean was responding.
+var navigation_source = bufnr()
+lean#Definition()
+lean#Hover()
+lean#Outline()
+execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+cursor(3, 2)
+var destination = win_getid()
+var destination_cursor = getcurpos()[1 : 2]
+var destination_list = getloclist(0)
+sleep 400m
+assert_equal(destination, win_getid(), 'a delayed response changed the active window')
+assert_equal('Basic.lean', expand('%:t'), 'a delayed definition replaced the active buffer')
+assert_equal(destination_cursor, getcurpos()[1 : 2], 'a delayed definition moved the active cursor')
+assert_equal(destination_list, getloclist(0), 'a delayed outline replaced another window list')
+assert_true(empty(popup_list()), 'a delayed hover appeared in another buffer')
+execute 'buffer ' .. navigation_source
+
 # LSP defines array order for multiple inserts at one position.
 enew!
 execute 'file ' .. fnameescape(root .. '/test/fixtures/WorkspaceEdit.lean')
@@ -65,6 +84,14 @@ assert_true(lean#util#ApplyTextEdits(edit_uri, [
   {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}, newText: 'B'},
 ]))
 assert_equal('ABX', getline(1), 'same-position LSP inserts were reversed')
+
+setline(1, 'XYZ')
+assert_true(lean#util#ApplyTextEdits(edit_uri, [
+  {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}, newText: 'A'},
+  {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}, newText: 'B'},
+  {range: {start: {line: 0, character: 0}, end: {line: 0, character: 1}}, newText: 'C'},
+]), 'ordered inserts followed by a replacement were rejected')
+assert_equal('ABCYZ', getline(1))
 
 setline(1, 'abcd')
 assert_false(lean#util#ApplyTextEdits(edit_uri, [
@@ -195,6 +222,18 @@ cursor(pin_lnum, 1)
 lean#infoview#JumpToTarget()
 assert_equal('Editor.lean', expand('%:t'), '<CR> jump did not focus the source window')
 assert_equal([2, 3], [line('.'), col('.')], '<CR> jump missed the pin position')
+
+# A pin retains its file when the infoview follows a different Lean buffer.
+execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+jump_view = lean#InfoviewState()
+pin_lnum = indexof(getbufline(jump_view.bufnr, 1, '$'), (_, text) => text =~# '^Pin ') + 1
+assert_match('Editor.lean', getbufline(jump_view.bufnr, pin_lnum)[0],
+  'a pin from another file did not identify its source')
+win_gotoid(bufwinid(jump_view.bufnr))
+cursor(pin_lnum, 1)
+lean#infoview#JumpToTarget()
+assert_equal('Editor.lean', expand('%:t'), 'pin jump went to the currently followed file')
+assert_equal([2, 3], [line('.'), col('.')], 'cross-file pin jump missed its position')
 lean#InfoviewClearPins()
 lean#InfoviewClose()
 
@@ -258,7 +297,7 @@ mkdir(fake_bin)
 var fake_curl = fake_bin .. '/curl'
 writefile([
   '#!/bin/sh',
-  'printf ''%s\n'' ''{"hits":[{"name":"Nat.succ","type":"Nat → Nat","module":"Init.Prelude"}]}''',
+  'printf ''%s\n'' ''{"hits":[{"name":"Nat.succ","type":"Nat → Nat\n  continuation","module":"Init.Prelude"}]}''',
 ], fake_curl)
 setfperm(fake_curl, 'rwxr-xr-x')
 var saved_path = $PATH
@@ -273,6 +312,7 @@ assert_true(WaitFor(() => getline(1) ==# 'Loogle: Nat.succ'),
   ':LeanLooglePopup did not submit the prompted query')
 assert_match('Nat.succ : Nat → Nat', getline(3),
   ':LeanLooglePopup did not render the search result')
+assert_equal('  continuation', getline(4), 'multiline Loogle types were not split into lines')
 close
 $PATH = saved_path
 delete(fake_curl)
@@ -285,6 +325,11 @@ var health_text = join(getline(1, '$'), "\n")
 assert_match('uri_encode(): ok', health_text, 'health report skipped builtin checks')
 assert_match('project root:', health_text, 'health report skipped the project root')
 assert_match('server initialized: true', health_text, 'health report skipped server state')
+assert_match('Recent server stderr:', health_text, 'health report omitted server errors')
+var health_buffer = bufnr()
+wincmd p
+lean#Health()
+assert_equal(health_buffer, bufnr(), 'repeating LeanHealth did not refresh the existing report')
 close
 
 lean#Stop()

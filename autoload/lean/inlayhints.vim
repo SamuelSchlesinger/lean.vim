@@ -9,7 +9,7 @@ import autoload 'lean/util.vim' as util
 # and Mathlib-sized files make whole-document requests wasteful.
 
 var generations: dict<number> = {}
-var inflight: dict<number> = {}
+var inflight: dict<list<number>> = {}
 var debounce_timers: dict<number> = {}
 var pending_insert: dict<bool> = {}
 var enabled_override = -1
@@ -62,44 +62,75 @@ def SupportsHints(bufnr: number): bool
   return type(provider) == v:t_dict
 enddef
 
-def VisibleRange(bufnr: number): list<number>
-  return util.VisibleLineSpan(bufnr, max([0, config.Get().inlay_hints.margin]))
-enddef
-
 export def Refresh(bufnr: number)
   if !Enabled() || !bufloaded(bufnr) || !SupportsHints(bufnr)
     return
   endif
-  var span = VisibleRange(bufnr)
-  if empty(span)
+  if bufnr == bufnr() && mode(1) =~# '^i'
+      && !config.Get().inlay_hints.update_in_insert
+    pending_insert[string(bufnr)] = true
+    return
+  endif
+  lsp.Flush(bufnr)
+  var spans = util.VisibleLineRanges(bufnr, max([0, config.Get().inlay_hints.margin]))
+  if empty(spans)
     return
   endif
   EnsurePropTypes()
   var key = string(bufnr)
+  if has_key(debounce_timers, key)
+    timer_stop(remove(debounce_timers, key))
+  endif
   var request_generation = get(generations, key, 0) + 1
   generations[key] = request_generation
-  if get(inflight, key, -1) > 0
-    lsp.Cancel(bufnr, inflight[key])
-  endif
+  for request in get(inflight, key, [])
+    lsp.Cancel(bufnr, request)
+  endfor
+  inflight[key] = []
   var version = getbufvar(bufnr, 'lean_lsp_version', 0)
+  var changedtick = getbufvar(bufnr, 'changedtick', -1)
   var line_count = len(getbufline(bufnr, 1, '$'))
-  var end_position: dict<number>
-  if span[1] < line_count
-    end_position = {line: span[1], character: 0}
-  else
-    var text = get(getbufline(bufnr, line_count), 0, '')
-    end_position = {
-      line: line_count - 1,
-      character: max([0, utf16idx(text, strlen(text))]),
-    }
+  var batch: dict<any> = {remaining: len(spans), hints: [], error: v:null}
+  for span in spans
+    # Vim closures share the for-loop variable; bind this request's range.
+    var Reply = function(OnRangeHints,
+      [bufnr, request_generation, version, changedtick, batch, span])
+    var end_position: dict<number>
+    if span[1] < line_count
+      end_position = {line: span[1], character: 0}
+    else
+      var text = get(getbufline(bufnr, line_count), 0, '')
+      end_position = {line: line_count - 1,
+        character: max([0, utf16idx(text, strlen(text))])}
+    endif
+    var request = lsp.Request(bufnr, 'textDocument/inlayHint', {
+      textDocument: {uri: util.UriFromBuf(bufnr)},
+      range: {start: {line: span[0] - 1, character: 0}, end: end_position},
+    }, Reply)
+    add(inflight[key], request)
+  endfor
+enddef
+
+def OnRangeHints(bufnr: number, generation: number, version: number, changedtick: number,
+    batch: dict<any>, span: list<number>, result: any, error: any)
+  if get(generations, string(bufnr), -1) != generation
+    return
   endif
-  inflight[key] = lsp.Request(bufnr, 'textDocument/inlayHint', {
-    textDocument: {uri: util.UriFromBuf(bufnr)},
-    range: {
-      start: {line: span[0] - 1, character: 0},
-      end: end_position,
-    },
-  }, (result, error) => OnHints(bufnr, request_generation, version, result, error))
+  if type(error) == v:t_dict
+    batch.error = error
+  elseif type(result) == v:t_list
+    for hint in result
+      var position = type(hint) == v:t_dict ? get(hint, 'position', {}) : {}
+      var line = type(position) == v:t_dict ? get(position, 'line', -1) : -1
+      if type(line) == v:t_number && line >= span[0] - 1 && line < span[1]
+        add(batch.hints, hint)
+      endif
+    endfor
+  endif
+  batch.remaining -= 1
+  if batch.remaining == 0
+    OnHints(bufnr, generation, version, changedtick, batch.hints, batch.error)
+  endif
 enddef
 
 def HintLabel(label: any): string
@@ -118,18 +149,24 @@ def HintLabel(label: any): string
   return ''
 enddef
 
-def OnHints(bufnr: number, request_generation: number, version: number,
+def OnHints(bufnr: number, request_generation: number, version: number, changedtick: number,
     result: any, error: any)
   var key = string(bufnr)
   if get(generations, key, -1) != request_generation
     return
   endif
-  inflight[key] = -1
+  inflight[key] = []
   if type(error) == v:t_dict
     # Keep what is rendered; the next sync or scroll refreshes.
     return
   endif
   if !bufloaded(bufnr) || getbufvar(bufnr, 'lean_lsp_version', -1) != version
+      || getbufvar(bufnr, 'changedtick', -1) != changedtick
+    return
+  endif
+  if bufnr == bufnr() && mode(1) =~# '^i'
+      && !config.Get().inlay_hints.update_in_insert
+    pending_insert[key] = true
     return
   endif
   if type(result) != v:t_list
@@ -247,9 +284,9 @@ export def Clear(bufnr: number)
   if has_key(pending_insert, key)
     remove(pending_insert, key)
   endif
-  if get(inflight, key, -1) > 0
-    lsp.Cancel(bufnr, inflight[key])
-  endif
+  for request in get(inflight, key, [])
+    lsp.Cancel(bufnr, request)
+  endfor
   if has_key(inflight, key)
     remove(inflight, key)
   endif

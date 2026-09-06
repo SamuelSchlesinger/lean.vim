@@ -81,6 +81,19 @@ for _ in range(10)
 endfor
 assert_true(rerendered, 'scrolling did not re-render progress signs around the new view')
 
+# Two distant views of a large file must both get signs without decorating
+# the invisible gap (or spending the sign budget on that gap).
+split
+cursor(2800, 1)
+normal! zz
+redraw!
+lean#lsp#RefreshProgress(bufnr())
+assert_true(indexof(ProgressSigns(), (_, sign) => sign.lnum == 2800) >= 0,
+  'distant split lost its progress signs to the invisible gap')
+assert_equal(-1, indexof(ProgressSigns(), (_, sign) => sign.lnum == 2000),
+  'progress signs decorated lines between distant visible ranges')
+close
+
 # A semantic-token edit burst coalesces into few requests.
 def SemanticRequestCount(): number
   var count = 0
@@ -102,6 +115,23 @@ sleep 600m
 var semantic_after = SemanticRequestCount()
 assert_true(semantic_after - semantic_before <= 2,
   $'an edit burst issued {semantic_after - semantic_before} semantic-token requests')
+
+# Overlapping processing ranges count each line once, and the range ending
+# at line 2250, column zero does not include that line.
+lean#lsp#Notify(bufnr(), 'test/progress', {
+  textDocument: {uri: lean#util#UriFromBuf(bufnr()), version: b:lean_lsp_version},
+  processing: [
+    {range: {start: {line: 0, character: 0}, end: {line: 1500, character: 0}}},
+    {range: {start: {line: 750, character: 0}, end: {line: 2250, character: 0}}},
+    {range: {start: {line: 0, character: 0}, end: {line: 1500, character: 0}}},
+  ],
+})
+assert_true(WaitFor(() => lean#lsp#ProgressSummary(bufnr()).percent == 75),
+  'processing percentages counted overlapping ranges more than once')
+assert_true(lean#lsp#ProgressAt(bufnr(), 2249))
+assert_false(lean#lsp#ProgressAt(bufnr(), 2250), 'progress included the exclusive end line')
+lnums = mapnew(ProgressSigns(), (_, sign) => sign.lnum)
+assert_equal(len(lnums), len(uniq(sort(copy(lnums), 'n'))), 'processing ranges placed duplicate signs')
 
 lean#Stop()
 sleep 50m

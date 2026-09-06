@@ -6,7 +6,7 @@ names, mapping conventions, and configuration shape, so shared dotfiles and
 muscle memory carry over — but the two projects have since diverged: this
 one is self-contained where lean.nvim composes with the Neovim ecosystem,
 adds some behavior of its own, and deliberately stops short of the
-interactive widget UI that only Neovim can render. See
+interactive widget UI provided by lean.nvim. See
 [Relationship to lean.nvim](#relationship-to-leannvim) for the specifics.
 
 It runs Lean's language server directly over Vim jobs and channels; Neovim
@@ -26,12 +26,12 @@ tour, or `:help lean-vim9` for the full reference.
 ## Requirements
 
 - Vim 9.2, or a late Vim 9.1 that provides `uri_encode()`, built with
-  `+vim9script`, `+job`, `+channel`, `+popupwin`, `+textprop`, and `+signs`
+  `+vim9script`, `+job`, `+channel`, `+popupwin`, `+textprop`, `+signs`, and `+timers`
   (the plugin checks at startup and reports clearly when a build is too old)
 - Lean 4 on `PATH` (normally installed with `elan`)
 - `lake` on `PATH` for Lake projects
 
-The test suite currently exercises Vim 9.2 (patches 1-850) and Lean 4.32.2.
+The test suite has been validated with Vim 9.2 (patches 1-850) and Lean 4.33.1.
 
 ## Installation
 
@@ -40,7 +40,7 @@ simplest option:
 
 ```sh
 mkdir -p ~/.vim/pack/plugins/start
-git clone <repository-url> ~/.vim/pack/plugins/start/lean.vim
+git clone https://github.com/SamuelSchlesinger/lean.vim.git ~/.vim/pack/plugins/start/lean.vim
 ```
 
 Enable filetype plugins and syntax in `.vimrc` if they are not already enabled:
@@ -138,10 +138,11 @@ The most useful commands are:
 - `:LeanInlayHintsToggle`, `:LeanLoogle` / `:LeanLooglePopup` (opt-in),
   `:LeanAbbreviationsReverseLookup`
 
-Completion works out of the box: identifiers and dot-completion pop up as you
-type (asynchronously — a busy elaborator never blocks typing), `<C-x><C-o>`
-triggers it manually, and the selected item's documentation is resolved into
-the preview popup. Theorems are tagged `t` in the menu. Inlay hints render as
+Completion works out of the box with `<C-x><C-o>`. Enable
+`completion.autotrigger` for identifier and dot completion as you type.
+Both modes run asynchronously, load documentation for the selected item,
+and apply its text edits as one undoable change. Theorems are tagged `t` in
+the menu. Inlay hints render as
 virtual text over the visible portion of the file and follow scrolling.
 
 Inside the infoview, `<CR>` jumps the source window to the entry under the
@@ -217,7 +218,7 @@ make lint       # compile every Vim9 module
 make test       # fake-server transport and editor integration
 make test-live  # end-to-end check against the installed Lean server
 make license-check # verify pinned third-party files and required notices
-make hooks      # run lint/license on commit and the full suite on push
+make hooks      # run lint and the offline suite before commits and pushes
 ```
 
 CI runs `make lint` and `make test` on Linux and macOS for every push and
@@ -233,8 +234,9 @@ shutdown, request cancellation, failed-start backoff, diagnostics, progress
 completion (async popup, UTF-16 textEdits, cancellation, resolve,
 abbreviation interplay), inlay hints, infoview jumping, document and
 workspace symbols, UTF-16 incremental changes, restart races, workspace-edit
-preflight, tab and ftplugin lifecycle, indentation, and Unicode abbreviation
-insertion. The live test checks goal retrieval, diagnostic updates, Lake
+preflight, stale-edit rejection, crash recovery across buffers, tab and
+ftplugin lifecycle, indentation, and Unicode abbreviation insertion. The live
+test checks goal retrieval, completion acceptance, diagnostic updates, Lake
 startup, and search paths against real Lean processes.
 
 ## License

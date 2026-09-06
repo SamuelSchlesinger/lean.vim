@@ -27,7 +27,7 @@ navigation, and code actions.
 Requirements:
 
   - Vim 9.2, or a late Vim 9.1 providing uri_encode(), built with
-    +vim9script +job +channel +popupwin +textprop +signs
+    +vim9script +job +channel +popupwin +textprop +signs +timers
     (the plugin checks at startup and reports missing pieces clearly)
   - Lean 4 and, for Lake projects, lake on $PATH
   - curl on $PATH only for the optional Loogle commands
@@ -139,67 +139,120 @@ example LeanSemantic_function) for :highlight-based restyling.
 
 Goals and diagnostics:~
 
-  :LeanGoal                   Show the tactic goal at the cursor.
-  :LeanTermGoal               Show the term-mode expected type.
-  :LeanLineDiagnostics        Show diagnostics for the current line.
-  :LeanDiagnosticsList        Put every buffer diagnostic in the location
+  :LeanGoal                                                        *:LeanGoal*
+                              Show the tactic goal at the cursor.
+  :LeanTermGoal                                                *:LeanTermGoal*
+                              Show the term-mode expected type.
+  :LeanLineDiagnostics                                  *:LeanLineDiagnostics*
+                              Show diagnostics for the current line.
+  :LeanDiagnosticsList                                  *:LeanDiagnosticsList*
+                              Put every buffer diagnostic in the location
                               list.
-  :LeanHover                  Show LSP hover information.
+  :LeanHover                                                      *:LeanHover*
+                              Show LSP hover information.
 
 Infoview:~
 
-  :LeanInfoviewOpen           Open the current tab's infoview.
-  :LeanInfoviewClose          Close it.
-  :LeanInfoviewToggle         Toggle it.
-  :LeanGotoInfoview           Move between source and infoview.
-  :LeanInfoviewAddPin         Save the current goal as a pin.
-  :LeanInfoviewClearPins      Remove all pins.
-  :LeanInfoviewPinTogglePause Pause or resume cursor-following updates.
-  :LeanInfoviewSetDiffPin     Save the current goal as diff baseline.
-  :LeanInfoviewClearDiffPin   Remove the diff baseline.
-  :LeanInfoviewToggleAutoDiffPin
+  :LeanInfoviewOpen                                        *:LeanInfoviewOpen*
+                              Open the current tab's infoview.
+  :LeanInfoviewClose                                      *:LeanInfoviewClose*
+                              Close it.
+  :LeanInfoviewCloseAll                                *:LeanInfoviewCloseAll*
+                              Close infoviews in every tab.
+  :LeanInfoviewToggle                                    *:LeanInfoviewToggle*
+                              Toggle it.
+  :LeanGotoInfoview                                        *:LeanGotoInfoview*
+                              Move between source and infoview.
+  :LeanInfoviewAddPin                                    *:LeanInfoviewAddPin*
+                              Save the current goal as a pin.
+  :LeanInfoviewClearPins                              *:LeanInfoviewClearPins*
+                              Remove all pins.
+  :LeanInfoviewPinTogglePause                    *:LeanInfoviewPinTogglePause*
+                              Pause or resume cursor-following updates.
+  :LeanInfoviewSetDiffPin                            *:LeanInfoviewSetDiffPin*
+                              Save the current goal as diff baseline.
+  :LeanInfoviewClearDiffPin                        *:LeanInfoviewClearDiffPin*
+                              Remove the diff baseline.
+  :LeanInfoviewToggleAutoDiffPin              *:LeanInfoviewToggleAutoDiffPin*
                               Compare each goal with the previous goal.
+                                    *:LeanInfoviewToggleNoClearAutoDiffPin*
+  :LeanInfoviewToggleNoClearAutoDiffPin
+                              Toggle automatic diffs, retaining the baseline.
+  :LeanInfoviewAcceptSuggestion                *:LeanInfoviewAcceptSuggestion*
+                              Select a code action at the source entry.
+  :LeanInfoviewViewOptions                          *:LeanInfoviewViewOptions*
+                              Show the effective infoview options.
+  :LeanInfoviewOpenDebug                              *:LeanInfoviewOpenDebug*
+                              Show server state and recent stderr.
+  :LeanInfoviewEnableWidgets                      *:LeanInfoviewEnableWidgets*
+                              Explain the plain-text widget limitation.
+  :LeanInfoviewDisableWidgets                    *:LeanInfoviewDisableWidgets*
+                              Explain the plain-text widget limitation.
 
 Inside the infoview, <CR> jumps the source window to the entry under the
 cursor: the position header, a pin, or a diagnostic.
+Pins are snapshots retaining their original file and position; they do not
+re-elaborate or move as the file is edited.
 
 Server and editor:~
 
-  :LeanRestartFile            Restart elaboration for the current file.
-  :LeanRefreshFileDependencies
+  :LeanRestartFile                                          *:LeanRestartFile*
+                              Restart elaboration for the current file.
+  :LeanRefreshFileDependencies                  *:LeanRefreshFileDependencies*
                               Alias for :LeanRestartFile.
-  :LeanRestartServer          Restart the project language server.
-  :LeanStatus                 Show connection information.
-  :LeanDefinition             Jump to definition.
-  :LeanDeclaration            Jump to declaration.
-  :LeanTypeDefinition         Jump to type definition.
-  :LeanReferences             Put references in the quickfix list.
-  :LeanRename                 Rename the symbol under the cursor.
-  :LeanCodeAction             Select a code action.
-  :LeanSorryFill              Insert enough sorry tactics for current goals.
-  :LeanModuleImports          List direct imports in quickfix.
-  :LeanModuleImportedBy       List direct importers in quickfix.
-  :LeanSearchPaths            Show Lean's project search paths.
-  :LeanOutline                Put the document symbols in the location list.
-  :LeanWorkspaceSymbols {q}   Search workspace symbols into quickfix.
-  :LeanInlayHintsToggle       Toggle inlay-hint rendering.
-  :LeanHealth                 Report toolchain, builtin, and server health.
-  :LeanLoogle {pattern}       Search loogle.lean-lang.org (needs
+  :LeanRestartServer                                      *:LeanRestartServer*
+                              Restart the project language server.
+  :LeanStatus                                                    *:LeanStatus*
+                              Show connection information.
+  :LeanDefinition                                            *:LeanDefinition*
+                              Jump to definition.
+  :LeanDeclaration                                          *:LeanDeclaration*
+                              Jump to declaration.
+  :LeanTypeDefinition                                    *:LeanTypeDefinition*
+                              Jump to type definition.
+  :LeanReferences                                            *:LeanReferences*
+                              Put references in the quickfix list.
+  :LeanRename                                                    *:LeanRename*
+                              Rename the symbol under the cursor.
+  :LeanCodeAction                                            *:LeanCodeAction*
+                              Select a code action.
+  :LeanSorryFill                                              *:LeanSorryFill*
+                              Insert enough sorry tactics for current goals.
+  :LeanModuleImports                                      *:LeanModuleImports*
+                              List direct imports in quickfix.
+  :LeanModuleImportedBy                                *:LeanModuleImportedBy*
+                              List direct importers in quickfix.
+  :LeanSearchPaths                                          *:LeanSearchPaths*
+                              Show Lean's project search paths.
+  :LeanOutline                                                  *:LeanOutline*
+                              Put the document symbols in the location list.
+  :LeanWorkspaceSymbols {q}                            *:LeanWorkspaceSymbols*
+                              Search workspace symbols into quickfix.
+  :LeanInlayHintsToggle                                *:LeanInlayHintsToggle*
+                              Toggle inlay-hint rendering.
+  :LeanHealth                                                    *:LeanHealth*
+                              Report toolchain, builtin, and server health.
+  :LeanLoogle {pattern}                                          *:LeanLoogle*
+                              Search loogle.lean-lang.org (needs
                               loogle.enable and curl; see
                               |lean-vim9-configuration|).
-  :LeanLooglePopup            Prompt for a Loogle pattern, then search.
-  :LeanAbbreviationsReverseLookup
+  :LeanLooglePopup                                          *:LeanLooglePopup*
+                              Prompt for a Loogle pattern, then search.
+  :LeanAbbreviationsReverseLookup            *:LeanAbbreviationsReverseLookup*
                               Show abbreviations for the current symbol.
 
 ===============================================================================
 5. Completion                                            *lean-vim9-completion*
 
-Lean buffers get an 'omnifunc' (CTRL-X CTRL-O) and, by default, as-you-type
-popup completion.  Typing an identifier character schedules a request after
-completion.debounce milliseconds; typing "." asks immediately.  Results
+Lean buffers get an 'omnifunc' (CTRL-X CTRL-O). With completion.autotrigger
+enabled, typing an identifier character schedules a request after
+completion.debounce milliseconds; typing "." asks immediately. Results
 arrive asynchronously — a slow elaborator never blocks typing — and the
 selected item's documentation is resolved lazily into the info popup.
 Theorems are marked with kind "t" in the menu.
+CTRL-Y accepts the selected item. Its text edit and additional edits are
+applied together, with one undo restoring the previous text. An insert/replace
+edit uses the insert range, preserving the suffix after the cursor.
 
 With completion.set_completeopt (the default) 'completeopt' is set
 buffer-locally to menuone,noinsert,noselect,popup, which the popup flow
@@ -219,7 +272,7 @@ popup menu.
 6. Statusline                                            *lean-vim9-statusline*
 
 lean#StatuslineProgress() returns a short summary for attached Lean buffers
-(elaboration percentage while processing, then E:/W: diagnostic counts) and
+(percentage of lines still processing, then E:/W: diagnostic counts) and
 an empty string elsewhere: >
 
   set statusline+=%{lean#StatuslineProgress()}

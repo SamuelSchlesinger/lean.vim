@@ -86,6 +86,31 @@ assert_true(WaitFor(() => empty(HintProps())), 'toggle off did not clear hints')
 LeanInlayHintsToggle
 assert_true(WaitFor(() => len(HintProps()) == 2), 'toggle on did not restore hints')
 
+# Widely separated splits should request their own visible ranges, rather
+# than asking Lean to elaborate all the hidden lines between them.
+append(line('$'), repeat(['-- filler'], 3000))
+lean#lsp#DidChange(bufnr())
+cursor(1, 1)
+normal! zt
+split
+cursor(2800, 1)
+normal! zz
+redraw!
+requests_before = HintRequestCount()
+lean#inlayhints#Refresh(bufnr())
+assert_true(WaitFor(() => HintRequestCount() >= requests_before + 2),
+  'distant splits did not get separate inlay-hint requests')
+var requests = filter(mapnew(readfile(rpc_log), (_, text) => json_decode(text)),
+  (_, message) => get(message, 'method', '') ==# 'textDocument/inlayHint')[requests_before :]
+assert_true(indexof(requests, (_, request) => request.params.range.start.line < 6) >= 0)
+assert_true(indexof(requests, (_, request) => request.params.range.start.line > 2500) >= 0)
+assert_equal(-1, indexof(requests, (_, request) =>
+  request.params.range.end.line - request.params.range.start.line > 200),
+  'inlay-hint requests included the invisible gap between windows')
+sleep 100m
+assert_equal(2, len(HintProps()), 'combining distant hint ranges lost or duplicated hints')
+close
+
 # Detaching the server leaves no hint properties behind.
 lean#Stop()
 sleep 50m

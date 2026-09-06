@@ -38,6 +38,36 @@ assert_true(WaitFor(() => !empty(lean#lsp#DiagnosticsAt(state.source_bufnr, 1)))
   'real Lean server did not accept the incremental didChange notification')
 
 lean#InfoviewClose()
+
+# Exercise the default manual completion flow against Lean itself, including
+# applying the server's real textEdit instead of only checking its JSON.
+setline(5, '#check Nat.su')
+var completion_poll = {elapsed: 0, selected: false, labels: []}
+def AcceptSucc(_timer: number)
+  if pumvisible()
+    var items = complete_info(['items']).items
+    completion_poll.labels = mapnew(items, (_, item) => get(item, 'abbr', item.word))
+    var index = indexof(items, (_, item) =>
+      get(item, 'abbr', item.word) =~# '^\%(Nat\.\)\?succ$')
+    if index >= 0
+      completion_poll.selected = true
+      feedkeys(repeat("\<C-n>", index + 1) .. "\<C-y>\<Esc>", 'nt')
+      return
+    endif
+  endif
+  completion_poll.elapsed += 20
+  if completion_poll.elapsed >= 10000
+    feedkeys("\<Esc>", 'nt')
+  else
+    timer_start(20, AcceptSucc)
+  endif
+enddef
+timer_start(20, AcceptSucc)
+feedkeys("5GA\<C-x>\<C-o>", 'xt!')
+assert_true(completion_poll.selected,
+  'real Lean completion did not offer Nat.succ: ' .. string(completion_poll.labels))
+assert_equal('#check Nat.succ', getline(5), 'real Lean completion applied the wrong text edit')
+
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean')
 assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'lake serve did not initialize for the Lake fixture')

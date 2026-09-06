@@ -51,6 +51,32 @@ assert_true(exists($'#{abbreviation_group}#InsertCharPre'),
 assert_equal('g:LeanVim9Indent(v:lnum)', &l:indentexpr,
   'Lean indentation did not return after reattach')
 
+# Existing user mappings and local completion options survive both attaching
+# the plugin and later changing filetype.
+setlocal filetype=text
+nnoremap <buffer> K <Cmd>echo 'user hover'<CR>
+setlocal omnifunc=UserOmni completeopt=menu,longest
+setlocal filetype=lean
+assert_equal("<Cmd>echo 'user hover'<CR>", maparg('K', 'n'),
+  'suggested mappings replaced a user mapping')
+setlocal filetype=text
+assert_equal("<Cmd>echo 'user hover'<CR>", maparg('K', 'n'))
+assert_equal('UserOmni', &l:omnifunc, 'previous omnifunc was not restored')
+assert_equal('menu,longest', &l:completeopt, 'previous local completeopt was not restored')
+setlocal filetype=lean
+setlocal omnifunc=NewUserOmni completeopt=menu,preview
+setlocal filetype=text
+assert_equal('NewUserOmni', &l:omnifunc, 'cleanup overwrote a newer omnifunc')
+assert_equal('menu,preview', &l:completeopt, 'cleanup overwrote newer completion options')
+
+g:lean_config['completion'] = {set_completeopt: false}
+lean#config#Reset()
+setlocal filetype=lean
+setlocal completeopt=menuone,noinsert,noselect,popup
+setlocal filetype=text
+assert_equal('menuone,noinsert,noselect,popup', &l:completeopt,
+  'cleanup restored an option that the plugin had not changed')
+
 if !empty(v:errors)
   for error in v:errors
     echomsg error

@@ -9,7 +9,7 @@ endif
 
 syntax match leanInfoFilename '\%1l^.*$'
 syntax match leanInfoRule '^─\+$'
-syntax match leanInfoPin '^Pin \d\+:\d\+$'
+syntax match leanInfoPin '^Pin \%(.\+ \)\?\d\+:\d\+$'
 syntax match leanInfoGoalCount '^\d\+ goals$'
 syntax match leanInfoCase '^case\s.*$'
 syntax match leanInfoTurnstile '^⊢'

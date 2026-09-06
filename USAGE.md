@@ -41,6 +41,8 @@ removes them. Diff pins (`:LeanInfoviewSetDiffPin`, `<LocalLeader>dx`)
 record a baseline goal and show a `-`/`+` line diff as the goal evolves;
 `:LeanInfoviewToggleAutoDiffPin` re-baselines on every step. Pins are
 snapshots of text — they do not re-elaborate as the file changes.
+Each pin retains its original file; `<CR>` returns to that file even after
+the infoview follows a different buffer.
 
 `:LeanInfoviewPinTogglePause` freezes updates while you explore;
 `:LeanGoal` and `:LeanTermGoal` show one-off popups without the split.
@@ -54,14 +56,14 @@ Tab expands without inserting anything; Space expands and keeps the space.
 `:LeanAbbreviationsReverseLookup` (`<LocalLeader>\`) shows what to type to
 produce it.
 
-**Completion** pops up as you type identifiers, and immediately after `.`
-(so `Nat.` lists everything in the namespace). It is fully asynchronous —
-a busy elaborator never blocks your typing; results simply appear when
-ready. Navigate with `<C-n>`/`<C-p>`; the highlighted item's documentation
-loads into the preview popup on demand. Theorems are tagged `t` in the
-menu. `<C-x><C-o>` triggers completion (the default); set
-`completion.autotrigger: v:true` for an automatic as-you-type popup —
-each request costs the server real elaboration work, so it is opt-in.
+**Completion** starts with `<C-x><C-o>` by default. Set
+`completion.autotrigger: v:true` for a popup as you type identifiers and
+after `.` (so `Nat.` offers names in that namespace). Both modes are
+asynchronous: results appear when Lean is ready while you continue typing.
+Navigate with `<C-n>`/`<C-p>` and accept with `<C-y>`; documentation loads
+for the selected item. Theorems are tagged `t`. Accepting an item applies
+its replacement and any additional edits together; one undo reverts them.
+Automatic requests cost server elaboration work, so they are opt-in.
 
 The two features are aware of each other: while you're mid-abbreviation,
 completion stays out of the way, so `\al<Tab>` always expands rather than
@@ -81,7 +83,7 @@ fighting a popup for the Tab key.
   server. Variables and field projections stay uncolored on purpose — they
   are most of the file; `semantic_highlighting.links` opts them back in
   (for example `{'variable': 'Identifier'}`).
-- For a statusline summary (elaboration percentage plus error/warning
+- For a statusline summary (percentage still processing plus error/warning
   counts): `set statusline+=%{lean#StatuslineProgress()}`.
 
 ## Getting around
@@ -99,8 +101,9 @@ fighting a popup for the Tab key.
 
 - `:LeanCodeAction` (`<LocalLeader>a`) lists server code actions — this is
   how you accept `Try this:` suggestions.
-- `:LeanRename` renames project-wide with a preflighted, atomic workspace
-  edit (it rolls back cleanly rather than half-applying).
+- `:LeanRename` renames project-wide. Edits are checked before applying;
+  a reply is rejected if an open project buffer has changed in the meantime.
+  Unexpected application failures trigger a rollback attempt.
 - `:LeanSorryFill` inserts one `sorry` (or a `· sorry` per goal) matching
   the current indentation.
 

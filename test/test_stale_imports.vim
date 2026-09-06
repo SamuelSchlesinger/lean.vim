@@ -38,7 +38,8 @@ def CountFor(method: string, name: string): number
   for line in filereadable(rpc_log) ? readfile(rpc_log) : []
     var message = json_decode(line)
     if get(message, 'method', '') ==# method
-        && get(get(get(message, 'params', {}), 'textDocument', {}), 'uri', '') =~# name
+        && (empty(name)
+          || get(get(get(message, 'params', {}), 'textDocument', {}), 'uri', '') =~# name)
       count += 1
     endif
   endfor
@@ -82,6 +83,8 @@ assert_false(empty(lean#lsp#Diagnostics(broken_uri)),
   'the stale-imports diagnostic was dropped while still applicable')
 
 lean#Stop()
+assert_true(WaitFor(() => CountFor('exit', '') == 1),
+  'stale-imports server did not finish the shutdown handshake')
 delete(rpc_log)
 
 if !empty(v:errors)

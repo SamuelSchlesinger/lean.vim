@@ -67,6 +67,7 @@ def FailRequests(server: dict<any>, message: string)
   var error = {code: -32097, message: message}
   var pending = values(copy(server.pending))
   server.pending = {}
+  server.request_buffers = {}
   var queued = server.queue
   server.queue = []
   for callback in pending
@@ -210,6 +211,7 @@ def OnSemanticTokens(server: dict<any>, bufnr: number, version: number,
     return
   endif
   if getbufvar(bufnr, 'lean_lsp_version', -1) != version
+      || util.BufText(bufnr) !=# get(server.synced_texts, buffer_key, '')
     return
   endif
   if type(result) != v:t_dict
@@ -451,6 +453,9 @@ def CancelRequest(server: dict<any>, id: number)
     return
   endif
   var key = string(id)
+  if has_key(server.request_buffers, key)
+    remove(server.request_buffers, key)
+  endif
   if has_key(server.pending, key)
     NotifyServer(server, '$/cancelRequest', {id: id})
     remove(server.pending, key)
@@ -625,7 +630,7 @@ def SendDidOpen(server: dict<any>, bufnr: number, dependency_mode: string = 'nev
 enddef
 
 def OnInitialized(server: dict<any>, result: any, error: any)
-  if !IsCurrentServer(server)
+  if !IsCurrentServer(server) || !server.running
     return
   endif
   if type(error) == v:t_dict
@@ -778,6 +783,32 @@ def ValidRange(range: any, line_count: number): bool
       || range.end.character >= range.start.character)
 enddef
 
+def LastRangeLine(range: dict<any>): number
+  # LSP ends are exclusive; a range ending at column zero stops on the
+  # preceding line. A zero-width diagnostic still belongs to its start line.
+  return range.end.character == 0 && range.end.line > range.start.line
+    ? range.end.line - 1 : range.end.line
+enddef
+
+def ProcessingLineRanges(processing: list<any>, line_count: number): list<list<number>>
+  var ranges: list<list<number>> = []
+  for info in processing
+    if type(info) == v:t_dict && ValidRange(get(info, 'range', {}), line_count)
+      add(ranges, [info.range.start.line, min([line_count - 1, LastRangeLine(info.range)])])
+    endif
+  endfor
+  sort(ranges, (left, right) => left[0] - right[0])
+  var merged: list<list<number>> = []
+  for span in ranges
+    if !empty(merged) && span[0] <= merged[-1][1] + 1
+      merged[-1][1] = max([merged[-1][1], span[1]])
+    else
+      add(merged, span)
+    endif
+  endfor
+  return merged
+enddef
+
 def ClearDiagnosticProperties(bufnr: number)
   for severity in ['Error', 'Warning', 'Information', 'Hint']
     try
@@ -857,7 +888,7 @@ def RenderDiagnostics(uri: string, diagnostics: list<any>)
           group: 'lean-diagnostics',
           name: 'LeanGoalUnsolved',
           buffer: bufnr,
-          lnum: min([range.end.line, line_count - 1]) + 1,
+          lnum: min([LastRangeLine(range), line_count - 1]) + 1,
           priority: 11,
         })
         sign_id += 1
@@ -937,39 +968,35 @@ def RenderProgress(uri: string, processing: list<any>)
   if !config.Get().progress_bars.enable
     return
   endif
-  var span = util.VisibleLineSpan(bufnr, PROGRESS_MARGIN_LINES)
-  if empty(span)
+  var spans = util.VisibleLineRanges(bufnr, PROGRESS_MARGIN_LINES)
+  if empty(spans)
     return
   endif
   var line_count = len(getbufline(bufnr, 1, '$'))
   var sign_id = 1
   var signs: list<any> = []
-  for info in processing
-    if type(info) != v:t_dict
-      continue
-    endif
-    var range = get(info, 'range', {})
-    if !ValidRange(range, line_count)
-      continue
-    endif
-    var first = max([span[0] - 1, max([0, range.start.line])])
-    var last = min([span[1] - 1, min([line_count - 1, range.end.line])])
-    if last < first
-      continue
-    endif
-    for line_index in range(first, last)
-      if len(signs) >= MAX_PROGRESS_SIGNS
-        break
+  var processing_ranges = ProcessingLineRanges(processing, line_count)
+  for span in spans
+    for processing_span in processing_ranges
+      var first = max([span[0] - 1, processing_span[0]])
+      var last = min([span[1] - 1, processing_span[1]])
+      if last < first
+        continue
       endif
-      add(signs, {
-        id: sign_id,
-        group: 'lean-progress',
-        name: 'LeanProgress',
-        buffer: bufnr,
-        lnum: line_index + 1,
-        priority: 5,
-      })
-      sign_id += 1
+      for line_index in range(first, last)
+        if len(signs) >= MAX_PROGRESS_SIGNS
+          break
+        endif
+        add(signs, {
+          id: sign_id,
+          group: 'lean-progress',
+          name: 'LeanProgress',
+          buffer: bufnr,
+          lnum: line_index + 1,
+          priority: 5,
+        })
+        sign_id += 1
+      endfor
     endfor
   endfor
   if !empty(signs)
@@ -1162,9 +1189,15 @@ export def ApplyWorkspaceEdit(edit: any): bool
     endif
     seen_uris[operation.uri] = true
     if type(operation.version) == v:t_number
-      var target_bufnr = bufnr(util.PathFromUri(operation.uri))
+      var target_bufnr = util.FindBuffer(util.PathFromUri(operation.uri))
       if target_bufnr < 0 || !bufloaded(target_bufnr)
           || getbufvar(target_bufnr, 'lean_lsp_version', -1) != operation.version
+        return false
+      endif
+      var target_key = string(target_bufnr)
+      var target_server = get(servers, get(buffer_roots, target_key, ''), {})
+      var synced_text = get(get(target_server, 'synced_texts', {}), target_key, v:null)
+      if type(synced_text) != v:t_string || util.BufText(target_bufnr) !=# synced_text
         return false
       endif
     endif
@@ -1292,6 +1325,9 @@ def Dispatch(server: dict<any>, message: any)
     HandleNotification(server, message)
   elseif has_key(message, 'id')
     var key = string(message.id)
+    if has_key(server.request_buffers, key)
+      remove(server.request_buffers, key)
+    endif
     if has_key(server.pending, key)
       var callback = remove(server.pending, key)
       call(callback, [get(message, 'result', v:null), get(message, 'error', v:null)])
@@ -1347,6 +1383,7 @@ def StartServer(root: string): dict<any>
     root: root,
     command: [],
     pending: {},
+    request_buffers: {},
     queue: [],
     recv: '',
     body_length: -1,
@@ -1363,6 +1400,14 @@ def StartServer(root: string): dict<any>
     stopping: false,
     stop_timer: -1,
   }
+  # Automatic recovery must restore all attached documents in this project,
+  # including hidden buffers that may never emit another WinEnter.
+  for [key, buffer_root] in items(buffer_roots)
+    if buffer_root ==# root && bufloaded(str2nr(key))
+        && getbufvar(str2nr(key), '&filetype') ==# 'lean'
+      server.buffers[key] = true
+    endif
+  endfor
   servers[root] = server
   try
     var command = ServerCommand(root)
@@ -1413,7 +1458,7 @@ def EnsureServer(root: string): dict<any>
 enddef
 
 export def Attach(bufnr: number): bool
-  if !config.Get().lsp.enable || empty(bufname(bufnr))
+  if !config.Get().lsp.enable || !bufloaded(bufnr) || empty(bufname(bufnr))
       || getbufvar(bufnr, '&filetype') !=# 'lean'
     return false
   endif
@@ -1482,6 +1527,11 @@ export def Detach(bufnr: number)
   endif
   var server = servers[root]
   var uri = get(server.opened, key, getbufvar(bufnr, 'lean_lsp_uri', ''))
+  for [request_key, owner] in items(copy(server.request_buffers))
+    if owner == bufnr
+      CancelRequest(server, str2nr(request_key))
+    endif
+  endfor
   if has_key(server.opened, key)
     if server.initialized && SupportsOpenClose(server)
       NotifyServer(server, 'textDocument/didClose', {textDocument: {uri: uri}})
@@ -1595,6 +1645,23 @@ export def DidSave(bufnr: number)
   NotifyServer(server, 'textDocument/didSave', params)
 enddef
 
+def OnEditResponse(server: dict<any>, texts: dict<any>, uris: dict<any>,
+    callback: any, result: any, error: any)
+  if type(error) != v:t_dict
+    for [key, text] in items(texts)
+      var bufnr = str2nr(key)
+      if !IsCurrentServer(server) || !bufloaded(bufnr)
+          || util.UriFromBuf(bufnr) !=# get(uris, key, '')
+          || util.BufText(bufnr) !=# text
+        call(callback, [v:null, {code: -32801,
+          message: 'a project buffer changed while the edit was pending; request it again'}])
+        return
+      endif
+    endfor
+  endif
+  call(callback, [result, error])
+enddef
+
 export def Request(bufnr: number, method: string, params: any, callback: any): number
   var key = string(bufnr)
   if !has_key(buffer_roots, key) && !Attach(bufnr)
@@ -1626,13 +1693,39 @@ export def Request(bufnr: number, method: string, params: any, callback: any): n
     endif
     return -1
   endif
+  var edit_request = index(['textDocument/rename', 'textDocument/codeAction',
+    'codeAction/resolve'], method) >= 0
+  var Reply = callback
+  if edit_request && type(callback) == v:t_func
+    var texts: dict<any> = {}
+    var uris: dict<any> = {}
+    for buffer_key in keys(server.buffers)
+      var target = str2nr(buffer_key)
+      if bufloaded(target)
+        texts[buffer_key] = util.BufText(target)
+        uris[buffer_key] = util.UriFromBuf(target)
+      endif
+    endfor
+    Reply = (result, error) => OnEditResponse(server, texts, uris,
+      callback, result, error)
+  endif
   if !server.initialized
     var id = next_request_id
     next_request_id += 1
-    add(server.queue, {id: id, method: method, params: params, callback: callback})
+    add(server.queue, {id: id, method: method, params: params, callback: Reply})
+    server.request_buffers[string(id)] = bufnr
     return id
   endif
-  return RequestNow(server, method, params, callback)
+  if edit_request || method =~# '^workspace/'
+    for buffer_key in keys(server.buffers)
+      FlushChange(str2nr(buffer_key))
+    endfor
+  else
+    FlushChange(bufnr)
+  endif
+  var id = RequestNow(server, method, params, Reply)
+  server.request_buffers[string(id)] = bufnr
+  return id
 enddef
 
 export def Cancel(bufnr: number, request_id: number)
@@ -1800,7 +1893,7 @@ export def DiagnosticsAt(bufnr: number, line_index: number): list<any>
     endif
     var range = get(diagnostic, 'fullRange', get(diagnostic, 'range', {}))
     if ValidRange(range, line_count)
-        && line_index >= range.start.line && line_index <= range.end.line
+        && line_index >= range.start.line && line_index <= LastRangeLine(range)
       add(result, diagnostic)
     endif
   endfor
@@ -1815,7 +1908,7 @@ export def ProgressAt(bufnr: number, line_index: number): bool
     endif
     var range = get(info, 'range', {})
     if ValidRange(range, line_count)
-        && line_index >= range.start.line && line_index <= range.end.line
+        && line_index >= range.start.line && line_index <= LastRangeLine(range)
       return true
     endif
   endfor
@@ -1827,19 +1920,8 @@ enddef
 export def ProgressSummary(bufnr: number): dict<any>
   var line_count = max([1, len(getbufline(bufnr, 1, '$'))])
   var covered = 0
-  for info in get(progress_by_uri, util.UriFromBuf(bufnr), [])
-    if type(info) != v:t_dict
-      continue
-    endif
-    var range = get(info, 'range', {})
-    if !ValidRange(range, line_count)
-      continue
-    endif
-    var first = max([0, range.start.line])
-    var last = min([line_count - 1, range.end.line])
-    if last >= first
-      covered += last - first + 1
-    endif
+  for span in ProcessingLineRanges(get(progress_by_uri, util.UriFromBuf(bufnr), []), line_count)
+    covered += span[1] - span[0] + 1
   endfor
   return {
     processing: covered > 0,

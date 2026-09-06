@@ -11,7 +11,10 @@ def ErrorMessage(error: any): string
   return type(message) == v:t_string ? message : string(message)
 enddef
 
-def OnHover(result: any, error: any)
+def OnHover(context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context)
+    return
+  endif
   if type(error) == v:t_dict
     util.Popup('Lean hover', [ErrorMessage(error)])
     return
@@ -22,11 +25,15 @@ def OnHover(result: any, error: any)
 enddef
 
 export def Hover(bufnr: number = bufnr())
+  var context = util.CursorContext()
   lsp.Request(bufnr, 'textDocument/hover', util.PositionParams(bufnr),
-    (result, error) => OnHover(result, error))
+    (result, error) => OnHover(context, result, error))
 enddef
 
-def OnLocation(result: any, error: any)
+def OnLocation(context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context)
+    return
+  endif
   if type(error) == v:t_dict
     util.Notify(ErrorMessage(error), 'ErrorMsg')
     return
@@ -45,8 +52,9 @@ def OnLocation(result: any, error: any)
 enddef
 
 export def Goto(method: string, bufnr: number = bufnr())
+  var context = util.CursorContext()
   lsp.Request(bufnr, method, util.PositionParams(bufnr),
-    (result, error) => OnLocation(result, error))
+    (result, error) => OnLocation(context, result, error))
 enddef
 
 def LocationItem(location: dict<any>): dict<any>
@@ -81,7 +89,10 @@ def LocationItem(location: dict<any>): dict<any>
   }
 enddef
 
-def OnReferences(result: any, error: any)
+def OnReferences(context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context, false)
+    return
+  endif
   if type(error) == v:t_dict
     util.Notify(ErrorMessage(error), 'ErrorMsg')
     return
@@ -106,10 +117,11 @@ def OnReferences(result: any, error: any)
 enddef
 
 export def References(bufnr: number = bufnr())
+  var context = util.CursorContext()
   var params = util.PositionParams(bufnr)
   params.context = {includeDeclaration: true}
   lsp.Request(bufnr, 'textDocument/references', params,
-    (result, error) => OnReferences(result, error))
+    (result, error) => OnReferences(context, result, error))
 enddef
 
 def OnRename(result: any, error: any)
@@ -124,7 +136,13 @@ enddef
 
 export def Rename(bufnr: number = bufnr())
   var old_name = expand('<cword>')
-  var new_name = input('New name: ', old_name)
+  var new_name = ''
+  inputsave()
+  try
+    new_name = input('New name: ', old_name)
+  finally
+    inputrestore()
+  endtry
   if empty(new_name) || new_name ==# old_name
     return
   endif
@@ -202,7 +220,10 @@ export def ApplyCodeAction(bufnr: number, action: dict<any>)
   ApplyReadyCodeAction(bufnr, action)
 enddef
 
-def OnCodeActions(bufnr: number, changedtick: number, result: any, error: any)
+def OnCodeActions(bufnr: number, changedtick: number, context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context)
+    return
+  endif
   if type(error) == v:t_dict
     util.Notify(ErrorMessage(error), 'ErrorMsg')
     return
@@ -227,7 +248,7 @@ def OnCodeActions(bufnr: number, changedtick: number, result: any, error: any)
     if type(disabled) == v:t_dict
       title ..= $' [disabled: {get(disabled, "reason", "unavailable")}]'
     endif
-    add(choices, title)
+    add(choices, $'{len(choices)}. {title}')
   endfor
   var selection = inputlist(choices)
   if selection > 0 && selection <= len(actions)
@@ -236,6 +257,7 @@ def OnCodeActions(bufnr: number, changedtick: number, result: any, error: any)
 enddef
 
 export def CodeAction(bufnr: number = bufnr())
+  var context = util.CursorContext()
   var position = util.Position(bufnr)
   var params: dict<any> = {
     textDocument: {uri: util.UriFromBuf(bufnr)},
@@ -244,7 +266,7 @@ export def CodeAction(bufnr: number = bufnr())
   }
   var changedtick = getbufvar(bufnr, 'changedtick', -1)
   lsp.Request(bufnr, 'textDocument/codeAction', params,
-    (result, error) => OnCodeActions(bufnr, changedtick, result, error))
+    (result, error) => OnCodeActions(bufnr, changedtick, context, result, error))
 enddef
 
 const SYMBOL_KINDS = {
@@ -295,7 +317,10 @@ def FlattenDocumentSymbols(bufnr: number, symbols: list<any>, depth: number,
   endfor
 enddef
 
-def OnDocumentSymbols(bufnr: number, result: any, error: any)
+def OnDocumentSymbols(bufnr: number, context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context, false)
+    return
+  endif
   if type(error) == v:t_dict
     util.Notify(ErrorMessage(error), 'ErrorMsg')
     return
@@ -332,9 +357,10 @@ def OnDocumentSymbols(bufnr: number, result: any, error: any)
 enddef
 
 export def Outline(bufnr: number = bufnr())
+  var context = util.CursorContext()
   lsp.Request(bufnr, 'textDocument/documentSymbol', {
     textDocument: {uri: util.UriFromBuf(bufnr)},
-  }, (result, error) => OnDocumentSymbols(bufnr, result, error))
+  }, (result, error) => OnDocumentSymbols(bufnr, context, result, error))
 enddef
 
 def OnWorkspaceSymbols(query: string, result: any, error: any)

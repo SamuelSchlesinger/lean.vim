@@ -132,6 +132,17 @@ catch
 endtry
 assert_equal('', close_error, 'CloseAll errored on a last-window infoview')
 
+# A source buffer can be unloaded while its infoview remains. The view must
+# replace its old proof state with an explicit unloaded-source message.
+execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
+lean#InfoviewOpen()
+var unloaded_view = lean#InfoviewState()
+win_gotoid(bufwinid(unloaded_view.bufnr))
+execute 'bunload! ' .. unloaded_view.source_bufnr
+sleep 20m
+assert_match('no longer loaded', join(getbufline(unloaded_view.bufnr, 1, '$'), "\n"),
+  'unloading the source left stale proof information in its infoview')
+
 lean#InfoviewCloseAll()
 if !empty(v:errors)
   for error in v:errors

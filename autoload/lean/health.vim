@@ -12,6 +12,8 @@ const REQUIRED_FUNCTIONS = [
   'uri_encode', 'uri_decode', 'utf16idx', 'indexof', 'prop_add_list',
 ]
 const TOOLS = ['lean', 'lake', 'elan', 'curl']
+var report_buffer = -1
+var report_generation = 0
 
 def Mark(ok: bool): string
   return ok ? 'ok' : 'MISSING'
@@ -24,8 +26,8 @@ def ToolVersionLine(tool: string, result: dict<any>): string
   return $'  - {tool}: {trim(result.stdout[0])}'
 enddef
 
-def UpdateToolLine(bufnr: number, tool: string, result: dict<any>)
-  if !bufloaded(bufnr)
+def UpdateToolLine(bufnr: number, generation: number, tool: string, result: dict<any>)
+  if !bufloaded(bufnr) || generation != report_generation
     return
   endif
   var marker = $'  - {tool}: checking version...'
@@ -43,6 +45,8 @@ export def Report()
   var source_name = bufname(source_bufnr)
   var source_is_lean = getbufvar(source_bufnr, '&filetype') ==# 'lean'
   var status = lsp.Status(source_bufnr)
+  var source_root = source_is_lean && !empty(source_name)
+    ? lsp.ProjectRoot(source_name) : getcwd()
 
   var lines: list<string> = ['lean.vim health', '']
   add(lines, $'Vim: {v:version / 100}.{v:version % 100} (patch level {v:versionlong % 10000})')
@@ -82,6 +86,11 @@ export def Report()
   endif
 
   add(lines, '')
+  add(lines, 'Recent server stderr:')
+  var history = lsp.Stderr()
+  extend(lines, empty(history) ? ['  (none)'] : history[max([0, len(history) - 20]) :])
+
+  add(lines, '')
   add(lines, 'Data files:')
   var abbreviations = globpath(&runtimepath, 'data/lean/abbreviations.json', false, true)
   add(lines, $'  - abbreviations.json: {empty(abbreviations) ? "MISSING from runtimepath" : abbreviations[0]}')
@@ -92,18 +101,32 @@ export def Report()
     add(lines, $'  {key}: {string(config.Get()[key])}')
   endfor
 
-  new
+  if bufexists(report_buffer)
+    var winid = bufwinid(report_buffer)
+    if winid > 0
+      win_gotoid(winid)
+    else
+      execute 'sbuffer ' .. report_buffer
+    endif
+  else
+    new
+    report_buffer = bufnr()
+    execute 'file [Lean\ Health]'
+  endif
   setlocal buftype=nofile bufhidden=wipe noswapfile
   var report_bufnr = bufnr()
-  execute 'file [Lean\ Health]'
+  report_generation += 1
+  var generation = report_generation
+  setlocal modifiable
+  silent :%delete _
   setline(1, lines)
   setlocal nomodifiable
   nnoremap <silent><buffer> q <Cmd>close<CR>
 
   for tool in pending_tools
     var captured = tool
-    editor.RunCommandAsync([captured, '--version'], getcwd(),
-      (result) => UpdateToolLine(report_bufnr, captured, result))
+    editor.RunCommandAsync([captured, '--version'], source_root,
+      (result) => UpdateToolLine(report_bufnr, generation, captured, result))
   endfor
 enddef
 

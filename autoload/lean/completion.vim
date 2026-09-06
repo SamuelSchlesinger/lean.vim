@@ -95,7 +95,8 @@ export def OmniFunc(findstart: number, base: string): any
   endif
   # During this call Vim parks the cursor at the start column; issuing the
   # request now would capture that position. Defer until the call returns.
-  timer_start(0, (_) => Start(bufnr, 'manual'))
+  StopTimer('debounce')
+  debounce_timer = timer_start(0, (_) => DebouncedStart(bufnr, 'manual'))
   return v:none
 enddef
 
@@ -126,6 +127,8 @@ def Start(bufnr: number, source: string)
     lnum: line('.'),
     col: col('.'),
     tick: b:changedtick,
+    uri: util.UriFromBuf(bufnr),
+    original: util.BufText(bufnr),
     request_id: -1,
     items: [],
     item_defaults: {},
@@ -190,12 +193,16 @@ def Show(request_generation: number)
   if startcol <= 0 || startcol > session.col
     return
   endif
+  session.startcol = startcol
   var vim_items: list<any> = []
   for index in SortedItemIndexes()
     add(vim_items, MapItem(session.items[index], index))
   endfor
   session.shown = true
   complete(startcol, vim_items)
+  # Replacing the omnifunc's initial completion fires CompleteDone inside
+  # complete(), clearing "shown" before the new popup takes over.
+  session.shown = true
 enddef
 
 def SortKey(item: dict<any>): string
@@ -272,13 +279,9 @@ def TextEditStartCharacter(): number
   return start
 enddef
 
-# 1-based byte column for complete(). Vim's popup filters items against the
-# text after the start column, so the column never moves before the local
-# word start: a uniform server textEdit beginning inside the word narrows the
-# column, while one reaching further back is honored after acceptance by
-# deleting the covered prefix (see FixupAcceptedEdit).
+# 1-based byte column for Vim's popup filtering. Each accepted item's actual
+# range is applied separately, including ranges reaching outside this base.
 def StartColumn(): number
-  session.accept_delete = []
   var line = getline(session.lnum)
   var cursor = session.col - 1
   var word_start = WordStart(line, cursor)
@@ -293,33 +296,96 @@ def StartColumn(): number
   if byte_col >= word_start
     return byte_col + 1
   endif
-  session.accept_delete = [byte_col, word_start]
   return word_start + 1
 enddef
 
-# Vim inserted the item at the word start; a textEdit that began earlier also
-# covers the bytes before it, which must go so the edit is not applied twice.
+# Completion ranges refer to the document at request time. Vim temporarily
+# inserts the filtering word; replace that exact preview with the selected
+# edit and its additional edits, without applying old offsets to new text.
 def FixupAcceptedEdit()
-  var deletion: list<number> = get(session, 'accept_delete', [])
-  if len(deletion) != 2 || session.bufnr != bufnr()
+  if session.bufnr != bufnr() || session.uri !=# util.UriFromBuf(bufnr())
     return
   endif
   var completed = get(v:completed_item, 'user_data', v:null)
   if type(completed) != v:t_dict
-      || get(completed, 'lean_completion_index', -1) < 0
+      || get(completed, 'lean_completion_generation', -1) != session.generation
     return
   endif
-  var line = getline(session.lnum)
-  if deletion[1] > strlen(line)
+  var index = get(completed, 'lean_completion_index', -1)
+  if index < 0 || index >= len(session.items)
     return
   endif
+  var item = session.items[index]
+  var original_lines = split(session.original, "\n", true)
+  var original_line = original_lines[session.lnum - 1]
+  var preview_range = {
+    start: {line: session.lnum - 1,
+      character: utf16idx(original_line, session.startcol - 1)},
+    end: {line: session.lnum - 1,
+      character: utf16idx(original_line, session.col - 1)},
+  }
+  var preview = util.EditText(session.original,
+    [{range: preview_range, newText: v:completed_item.word}])
+  if !preview.ok || util.BufText(bufnr()) !=# preview.text
+    util.Notify('buffer changed during completion; Lean edits were not applied')
+    return
+  endif
+  var edit = get(item, 'textEdit', {})
+  var edit_range = NormalizedRange(edit)
+  if type(edit_range) != v:t_dict
+    edit_range = NormalizedRange(get(session.item_defaults, 'editRange', {}))
+  endif
+  var new_text = get(item, 'insertText', get(item, 'label', ''))
+  if type(get(edit, 'newText', v:null)) == v:t_string
+    new_text = edit.newText
+  elseif type(get(session.item_defaults, 'editRange', v:null)) == v:t_dict
+    new_text = get(item, 'textEditText', get(item, 'label', ''))
+  endif
+  if type(edit_range) != v:t_dict
+    edit_range = deepcopy(preview_range)
+    edit_range.start.character = utf16idx(original_line,
+      WordStart(original_line, session.col - 1))
+  endif
+  var extra = get(item, 'additionalTextEdits', [])
+  if type(new_text) != v:t_string || type(extra) != v:t_list
+    util.Notify('Lean returned an invalid completion edit', 'ErrorMsg')
+    return
+  endif
+  var edits = [{range: edit_range, newText: new_text}] + extra
+  var result = util.EditText(session.original, edits)
+  if !result.ok
+    util.Notify('Lean returned an invalid completion edit', 'ErrorMsg')
+    return
+  endif
+  var main_start = util.TextOffset(session.original, edit_range.start)
+  var cursor_offset = main_start + strlen(new_text)
+  for additional in extra
+    var start = util.TextOffset(session.original, additional.range.start)
+    var finish = util.TextOffset(session.original, additional.range.end)
+    if finish <= main_start
+      cursor_offset += strlen(additional.newText) - (finish - start)
+    endif
+  endfor
   try
     undojoin
   catch /E790:/
   endtry
-  setline(session.lnum, strpart(line, 0, deletion[0]) .. strpart(line, deletion[1]))
-  if line('.') == session.lnum
-    cursor(session.lnum, max([1, col('.') - (deletion[1] - deletion[0])]))
+  if !util.ApplyPreparedTextEdits({ok: true, changed: result.text !=# preview.text,
+      bufnr: bufnr(), original: preview.text, text: result.text})
+    util.Notify('completion edit could not be applied', 'ErrorMsg')
+    return
+  endif
+  var before_cursor = strpart(result.text, 0, cursor_offset)
+  cursor(count(before_cursor, "\n") + 1,
+    cursor_offset - strridx(before_cursor, "\n"))
+  var command = get(item, 'command', v:null)
+  if type(command) == v:t_dict
+    lsp.Request(bufnr(), 'workspace/executeCommand', command,
+      (_result, error) => {
+        if type(error) == v:t_dict
+          util.Notify(get(error, 'message', 'completion command failed'), 'ErrorMsg')
+        endif
+      })
   endif
 enddef
 
@@ -341,14 +407,10 @@ def MapItem(item: dict<any>, index: number): dict<any>
   if type(label) != v:t_string
     label = string(label)
   endif
-  var word = label
-  var edit = get(item, 'textEdit', v:null)
-  if type(edit) == v:t_dict
-      && type(get(edit, 'newText', v:null)) == v:t_string
-    word = edit.newText
-  elseif type(get(item, 'insertText', v:null)) == v:t_string
-    word = item.insertText
-  endif
+  # Vim filters on "word"; LSP filters on filterText (or label), independently
+  # of the replacement text. CompleteDone installs the actual replacement.
+  var word = get(item, 'filterText', label)
+  word = type(word) == v:t_string ? word : label
   var detail = get(item, 'detail', '')
   if type(detail) != v:t_string
     detail = ''
@@ -364,7 +426,7 @@ def MapItem(item: dict<any>, index: number): dict<any>
   if empty(info)
     # Give the info popup initial content so an async resolve has a popup to
     # update; Vim only creates one for items with info text.
-    info = detail
+    info = empty(detail) ? ' ' : detail
   endif
   var kind = get(item, 'kind', 0)
   return {
@@ -375,7 +437,8 @@ def MapItem(item: dict<any>, index: number): dict<any>
     info: info,
     dup: 1,
     icase: 0,
-    user_data: {lean_completion_index: index},
+    user_data: {lean_completion_index: index,
+      lean_completion_generation: session.generation},
   }
 enddef
 
@@ -418,6 +481,7 @@ def OnTextChangedI(bufnr: number)
   var trigger = pending_trigger
   pending_trigger = ''
   if empty(trigger) || !Enabled(bufnr) || BuiltinAutocompleteActive()
+      || !config.Get().completion.autotrigger
       || getbufvar(bufnr, 'lean_abbrev_active', false)
     return
   endif
@@ -536,7 +600,6 @@ def OnCompleteDoneEvent()
     FixupAcceptedEdit()
   endif
   session.shown = false
-  session.accept_delete = []
 enddef
 
 def OnInsertLeaveEvent()
@@ -548,13 +611,19 @@ export def SetupBuffer(bufnr: number)
   if !config.Get().completion.enable
     return
   endif
+  if !getbufvar(bufnr, 'lean_completion_options_saved', false)
+    setbufvar(bufnr, 'lean_completion_options_saved', true)
+    setbufvar(bufnr, 'lean_completion_completeopt_set', false)
+    setbufvar(bufnr, 'lean_completion_saved_omnifunc', getbufvar(bufnr, '&omnifunc'))
+    setbufvar(bufnr, 'lean_completion_saved_completeopt', getbufvar(bufnr, '&l:completeopt'))
+  endif
   setbufvar(bufnr, '&omnifunc', 'lean#completion#OmniFunc')
   if config.Get().completion.set_completeopt
     setbufvar(bufnr, '&completeopt', 'menuone,noinsert,noselect,popup')
+    setbufvar(bufnr, 'lean_completion_completeopt_set', true)
   endif
-  if !config.Get().completion.autotrigger
-    return
-  endif
+  # Manual completion needs acceptance, resolve, cancellation, and incomplete
+  # list refresh too. Only starting an automatic request is opt-in.
   var group = $'lean_completion_{bufnr}'
   execute $'augroup {group}'
   autocmd!
@@ -578,12 +647,14 @@ export def TeardownBuffer(bufnr: number)
   augroup END
   if bufexists(bufnr)
       && getbufvar(bufnr, '&omnifunc', '') ==# 'lean#completion#OmniFunc'
-    setbufvar(bufnr, '&omnifunc', '')
+    setbufvar(bufnr, '&omnifunc', getbufvar(bufnr, 'lean_completion_saved_omnifunc', ''))
   endif
-  # 'completeopt' is global-local; only the current buffer can drop its local
-  # value back to the global one.
-  if bufnr == bufnr() && config.Get().completion.set_completeopt
-    setlocal completeopt<
+  if bufexists(bufnr) && getbufvar(bufnr, 'lean_completion_options_saved', false)
+    if getbufvar(bufnr, 'lean_completion_completeopt_set', false)
+        && getbufvar(bufnr, '&l:completeopt') ==# 'menuone,noinsert,noselect,popup'
+      setbufvar(bufnr, '&completeopt', getbufvar(bufnr, 'lean_completion_saved_completeopt', ''))
+    endif
+    setbufvar(bufnr, 'lean_completion_options_saved', false)
   endif
 enddef
 

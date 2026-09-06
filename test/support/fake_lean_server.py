@@ -70,6 +70,9 @@ def message_uri_fallback(message: dict[str, Any]) -> str:
 
 def handle_request(message: dict[str, Any]) -> None:
     method = message["method"]
+    if (method in {"textDocument/definition", "textDocument/hover", "textDocument/documentSymbol"}
+            and message.get("params", {}).get("textDocument", {}).get("uri", "").endswith("/Editor.lean")):
+        time.sleep(0.1)
     if method == "initialize":
         if initialize_delay:
             time.sleep(initialize_delay)
@@ -105,7 +108,48 @@ def handle_request(message: dict[str, Any]) -> None:
         if line == 3:
             # Slow reply: lets the client supersede and cancel this request.
             time.sleep(0.4)
-        if line == 1:
+        if line in {6, 7, 8, 9, 10}:
+            edit_range = {
+                "start": {"line": line, "character": 3},
+                "end": {"line": line, "character": 10},
+            }
+            item = {
+                "label": "abc completion",
+                "filterText": "abc",
+                "textEdit": {"range": edit_range, "newText": "replacement"},
+            }
+            if line == 7:
+                item["textEdit"] = {
+                    "insert": {"start": edit_range["start"], "end": position},
+                    "replace": edit_range,
+                    "newText": "inserted",
+                }
+            elif line == 8:
+                item["textEdit"]["newText"] = "first\nsecond"
+                item["additionalTextEdits"] = [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0},
+                    },
+                    "newText": "-- imported\n",
+                }]
+            elif line == 9:
+                item["label"] = "abc"
+                del item["filterText"]
+                item["insertText"] = "different"
+                del item["textEdit"]
+            elif line == 10:
+                item["textEdit"]["range"]["start"]["character"] = 0
+            items = [item]
+            if line == 10:
+                items.insert(0, {
+                    "label": "abcd", "textEdit": {
+                        "range": {"start": {"line": line, "character": 3}, "end": position},
+                        "newText": "abcd",
+                    }, "sortText": "0",
+                })
+            response(message, {"items": items, "isIncomplete": False})
+        elif line == 1:
             # The fixture line is `-- α😊abc`; the edit starts at the α
             # (UTF-16 unit 3), before the client's local word start, and the
             # replacement keeps the typed base as its prefix so Vim's popup
@@ -253,6 +297,13 @@ def handle_request(message: dict[str, Any]) -> None:
         )
     elif method == "textDocument/codeAction":
         response(message, [])
+    elif method == "textDocument/rename":
+        time.sleep(0.1)
+        response(message, {"changes": {message["params"]["textDocument"]["uri"]: [{
+            "range": {"start": {"line": 0, "character": 4},
+                      "end": {"line": 0, "character": 10}},
+            "newText": message["params"]["newName"],
+        }]}})
     elif method == "codeAction/resolve":
         resolved = dict(message["params"])
         resolved["command"] = {
@@ -504,6 +555,11 @@ while True:
     if incoming is None:
         break
     log(incoming)
+    if incoming.get("method") == "test/exit":
+        sys.exit(1)
+    if incoming.get("method") == "test/progress":
+        send({"jsonrpc": "2.0", "method": "$/lean/fileProgress", "params": incoming["params"]})
+        continue
     if "id" in incoming and "method" in incoming:
         handle_request(incoming)
     elif incoming.get("method") == "initialized":

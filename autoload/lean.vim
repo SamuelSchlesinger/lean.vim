@@ -66,14 +66,18 @@ enddef
 
 def DefinePlugMappings()
   for [plug, command] in plug_commands
-    execute $'nnoremap <silent><buffer> <Plug>({plug}) <Cmd>{command}<CR>'
+    if empty(maparg($'<Plug>({plug})', 'n'))
+      execute $'nnoremap <silent><buffer> <Plug>({plug}) <Cmd>{command}<CR>'
+    endif
   endfor
 enddef
 
 export def UseSuggestedMappings()
   DefinePlugMappings()
   for [lhs, plug] in suggested_mappings
-    execute $'nmap <silent><buffer> {lhs} <Plug>({plug})'
+    if empty(maparg(lhs, 'n'))
+      execute $'nmap <silent><buffer> {lhs} <Plug>({plug})'
+    endif
   endfor
 enddef
 
@@ -148,13 +152,16 @@ export def Attach(bufnr: number = bufnr())
 enddef
 
 export def OnBufWinEnter(bufnr: number)
-  if getbufvar(bufnr, '&filetype') !=# 'lean'
+  # bufload() temporarily shows hidden files in Vim's autocommand window.
+  # Workspace-edit preparation must not make the infoview follow that window.
+  if getbufvar(bufnr, '&filetype') !=# 'lean' || win_gettype() ==# 'autocmd'
     return
   endif
   Attach(bufnr)
   # Progress signs only decorate visible spans; a re-displayed buffer needs
   # its cached decorations back.
   lsp.RefreshProgress(bufnr)
+  inlayhints.OnBufferSynced(bufnr)
   if infoview.HasView()
     infoview.Follow(bufnr, win_getid())
   endif
@@ -198,6 +205,8 @@ enddef
 
 export def OnUnload(bufnr: number)
   lsp.Detach(bufnr)
+  # BufUnload fires before bufloaded() changes; refresh after it completes.
+  timer_start(0, (_) => infoview.RefreshServerState())
 enddef
 
 export def Detach(bufnr: number = bufnr())
@@ -397,6 +406,9 @@ export def InfoviewToggleAutoDiffPin(clear: bool = true)
 enddef
 
 export def InfoviewAcceptSuggestion()
+  if &filetype ==# 'leaninfo'
+    infoview.JumpToTarget()
+  endif
   editor.CodeAction()
 enddef
 

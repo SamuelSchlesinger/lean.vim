@@ -243,8 +243,11 @@ def Render(view: dict<any>)
   add(lines, repeat('─', 32))
 
   for pin in view.pins
-    add(lines, $'Pin {pin.line + 1}:{pin.character + 1}')
-    targets[len(lines)] = {line: pin.line, character: pin.character}
+    var pin_path = util.PathFromUri(pin.uri)
+    var source_label = pin.uri ==# util.UriFromBuf(view.source_bufnr)
+      ? '' : fnamemodify(pin_path, ':~:.') .. ' '
+    add(lines, $'Pin {source_label}{pin.line + 1}:{pin.character + 1}')
+    targets[len(lines)] = {line: pin.line, character: pin.character, uri: pin.uri}
     extend(lines, pin.lines)
     add(lines, '')
   endfor
@@ -294,6 +297,9 @@ def OnGoal(key: string, sequence: number, request_id: number,
     return
   endif
   var view = views[key]
+  if getbufvar(view.source_bufnr, 'changedtick', -1) != get(view, 'changedtick', -2)
+    return
+  endif
   if view.goal_request == request_id
     view.goal_request = -1
   endif
@@ -313,6 +319,9 @@ def OnTermGoal(key: string, sequence: number, request_id: number,
     return
   endif
   var view = views[key]
+  if getbufvar(view.source_bufnr, 'changedtick', -1) != get(view, 'changedtick', -2)
+    return
+  endif
   if view.term_request == request_id
     view.term_request = -1
   endif
@@ -483,6 +492,10 @@ export def JumpToTarget()
   if !bufloaded(view.source_bufnr) || !GoToSource(view)
     return
   endif
+  if has_key(target, 'uri') && target.uri !=# util.UriFromBuf(bufnr())
+    util.OpenLocation({uri: target.uri, range: {start: target}})
+    return
+  endif
   var lnum = min([line('$'), target.line + 1])
   cursor(lnum, util.ByteColumn(getline(lnum), target.character) + 1)
   normal! zv
@@ -517,6 +530,10 @@ def UpdateView(key: string, bufnr: number)
   endif
   var view = views[key]
   if !IsVisibleAnywhere(view) || bufnr != view.source_bufnr || view.paused
+    return
+  endif
+  if !bufloaded(bufnr)
+    Render(view)
     return
   endif
   if getbufvar(bufnr, '&filetype') !=# 'lean'
@@ -555,6 +572,7 @@ def UpdateView(key: string, bufnr: number)
   view.diagnostics = lsp.DiagnosticsAt(bufnr, view.position.line)
   view.goal = []
   view.term_goal = []
+  view.changedtick = getbufvar(bufnr, 'changedtick', -1)
   Render(view)
 
   var params = {
@@ -615,7 +633,10 @@ export def ScheduleUpdate(bufnr: number = bufnr())
   view.timer = timer_start(cooldown, (_) => TimerUpdate(key))
 enddef
 
-def OnPopupGoal(title: string, result: any, error: any)
+def OnPopupGoal(title: string, context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context)
+    return
+  endif
   if type(error) == v:t_dict
     var message = get(error, 'message', string(error))
     util.Popup(title, [type(message) == v:t_string ? message : string(message)])
@@ -625,13 +646,17 @@ def OnPopupGoal(title: string, result: any, error: any)
 enddef
 
 export def ShowGoal(bufnr: number = bufnr())
+  var context = util.CursorContext()
   var params = util.PositionParams(bufnr)
   params.position.character += 1
   lsp.Request(bufnr, '$/lean/plainGoal', params,
-    (result, error) => OnPopupGoal('Lean goal', result, error))
+    (result, error) => OnPopupGoal('Lean goal', context, result, error))
 enddef
 
-def OnPopupTermGoal(result: any, error: any)
+def OnPopupTermGoal(context: dict<any>, result: any, error: any)
+  if !util.ContextIsCurrent(context)
+    return
+  endif
   if type(error) == v:t_dict
     var message = get(error, 'message', string(error))
     util.Popup('Lean term goal', [type(message) == v:t_string ? message : string(message)])
@@ -644,8 +669,9 @@ def OnPopupTermGoal(result: any, error: any)
 enddef
 
 export def ShowTermGoal(bufnr: number = bufnr())
+  var context = util.CursorContext()
   lsp.Request(bufnr, '$/lean/plainTermGoal', util.PositionParams(bufnr),
-    (result, error) => OnPopupTermGoal(result, error))
+    (result, error) => OnPopupTermGoal(context, result, error))
 enddef
 
 export def ShowLineDiagnostics(bufnr: number = bufnr())
@@ -662,7 +688,11 @@ enddef
 
 export def RefreshServerState()
   for view in values(views)
-    if view.paused || !bufloaded(view.source_bufnr)
+    if !bufloaded(view.source_bufnr)
+      Render(view)
+      continue
+    endif
+    if view.paused
       continue
     endif
     view.processing = lsp.ProgressAt(view.source_bufnr, view.position.line)
@@ -672,7 +702,7 @@ export def RefreshServerState()
 enddef
 
 def OnPin(key: string, source_bufnr: number, generation: number,
-    request_id: number, line_index: number, character: number,
+    request_id: number, uri: string, line_index: number, character: number,
     result: any, error: any)
   if !has_key(views, key)
     return
@@ -689,6 +719,7 @@ def OnPin(key: string, source_bufnr: number, generation: number,
     return
   endif
   add(view.pins, {
+    uri: uri,
     line: line_index,
     character: character,
     lines: GoalLines(result),
@@ -702,7 +733,7 @@ export def AddPin(bufnr: number = bufnr())
     return
   endif
   var view = CurrentView()
-  if empty(view)
+  if empty(view) || !IsVisible(view) || view.source_bufnr != bufnr
     Open(bufnr)
     view = CurrentView()
     if empty(view)
@@ -712,13 +743,14 @@ export def AddPin(bufnr: number = bufnr())
   var params = util.PositionParams(bufnr)
   var line_index = params.position.line
   var character = params.position.character
+  var uri = params.textDocument.uri
   params.position.character += 1
   var key = ViewKey()
   var generation = view.pin_generation
   var request_id = -1
   request_id = lsp.Request(bufnr, '$/lean/plainGoal', params,
     (result, error) => OnPin(key, bufnr, generation, request_id,
-      line_index, character, result, error))
+      uri, line_index, character, result, error))
   if request_id > 0
     add(view.pin_requests, request_id)
   endif

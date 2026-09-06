@@ -43,6 +43,18 @@ lean#OnCursorMoved(bufnr())
 noautocmd call cursor(4, 1)
 lean#OnCursorMoved(bufnr())
 
+# A request made for a buffer that is detached before initialization must
+# never be sent after the server becomes ready.
+var queued_buffer = bufadd(root .. '/test/fixtures/Editor.lean')
+var source_before_load = lean#InfoviewState().source_bufnr
+bufload(queued_buffer)
+assert_equal(source_before_load, lean#InfoviewState().source_bufnr,
+  'loading a hidden buffer retargeted the infoview to the autocommand window')
+setbufvar(queued_buffer, '&filetype', 'lean')
+lean#lsp#Attach(queued_buffer)
+lean#lsp#Request(queued_buffer, 'test/detached', {}, (_result, _error) => 0)
+lean#lsp#Detach(queued_buffer)
+
 assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'delayed fake server did not initialize')
 assert_true(WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
@@ -52,6 +64,9 @@ sleep 50m
 
 var messages = mapnew(filereadable(rpc_log) ? readfile(rpc_log) : [],
   (_, line) => json_decode(line))
+assert_equal(-1, indexof(messages, (_, message) =>
+  get(message, 'method', '') ==# 'test/detached'),
+  'a detached buffer request was sent after initialization')
 assert_equal(1, len(filter(copy(messages), (_, message) =>
   get(message, 'method', '') ==# '$/lean/plainGoal')),
   'superseded goal requests were flushed after initialization')
