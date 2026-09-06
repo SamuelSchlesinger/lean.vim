@@ -185,8 +185,8 @@ Where lean.nvim remains ahead — deliberately not emulated here:
   graphics need Neovim's extmark and Lua UI substrate. The infoview uses
   Lean's stable `$/lean/plainGoal` and `$/lean/plainTermGoal` requests, with
   plain text, syntax highlighting, and `<CR>` jumps instead of an
-  interactive render tree; pins are textual snapshots rather than live,
-  re-elaborating markers.
+  interactive render tree. Live pins track source edits and refresh their
+  goals through the same plain-goal interface.
 - Telescope and satellite.nvim integrations are replaced by quickfix,
   location lists, and the sign column.
 
@@ -199,17 +199,20 @@ The transport is intentionally self-contained — depending on a second Vim
 LSP plugin would tie goal requests, restart behavior, and Lean-specific
 notifications to a third party's extension hooks.
 
-- `autoload/lean/lsp.vim` — LSP/JSON-RPC client, document state,
-  diagnostics, progress, semantic tokens, workspace edits
-- `autoload/lean/completion.vim` — async omnifunc and popup completion
-- `autoload/lean/inlayhints.vim` — visible-range inlay hints
-- `autoload/lean/infoview.vim` — goal UI, pins, diff pins, source jumps
-- `autoload/lean/abbreviations.vim` — Unicode expansion and reverse lookup
-- `autoload/lean/editor.vim` — hover, navigation, symbols, code actions,
-  sorry fill, search paths
-- `autoload/lean/health.vim`, `autoload/lean/loogle.vim` — `:LeanHealth`
-  and the opt-in Loogle search
-- `autoload/lean.vim` — commands, mappings, statusline, buffer lifecycle
+- `autoload/lean/lsp.vim`: transport, project sessions, document synchronization,
+  and the stable client API.
+- `documents.vim` and `requests.vim`: document lifetimes, revision snapshots,
+  request cancellation, and checks before delivering asynchronous results.
+- `decorations.vim`, `semantic.vim`, and `workspace.vim`: diagnostic/progress
+  rendering, semantic highlighting, and checked workspace-edit transactions.
+- `infoview.vim`, `infoview_render.vim`, and `pins.vim`: view state and windows,
+  pure text rendering, and live source anchors.
+- `completion.vim`, `inlayhints.vim`, `abbreviations.vim`, and `editor.vim`:
+  editing features; `health.vim` and `loogle.vim`: diagnostics and opt-in search.
+- `autoload/lean.vim`: commands, mappings, and feature lifecycle coordination.
+
+The import graph is acyclic and checked by `make lint`. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for ownership rules and extension points.
 
 ## Validation
 
@@ -228,16 +231,22 @@ test checks run locally before every commit and push (the suite takes a few
 seconds; skip with `--no-verify` when needed). `test-live` stays manual in
 both places since it needs a real Lean toolchain.
 
+The fake server supports named scenarios and explicit release of held replies;
+asynchronous tests can choose delivery order without server sleeps. The
+headless runner catches script errors and limits each Vim process to two
+minutes. See [test/support/README.md](test/support/README.md) for the harness.
+
 The headless tests cover split JSON-RPC frames, initialization and graceful
 shutdown, request cancellation, failed-start backoff, diagnostics, progress
 (including large-file sign capping), goals, term goals, semantic tokens,
 completion (async popup, UTF-16 textEdits, cancellation, resolve,
 abbreviation interplay), inlay hints, infoview jumping, document and
 workspace symbols, UTF-16 incremental changes, restart races, workspace-edit
-preflight, stale-edit rejection, crash recovery across buffers, tab and
-ftplugin lifecycle, indentation, and Unicode abbreviation insertion. The live
-test checks goal retrieval, completion acceptance, diagnostic updates, Lake
-startup, and search paths against real Lean processes.
+preflight, live pin tracking, paused pins, stale-edit rejection, crash recovery
+across buffers, tab and ftplugin lifecycle, indentation, and Unicode
+abbreviation insertion. The live test checks goal retrieval, live pin movement
+and goal refresh, completion acceptance, diagnostic updates, Lake startup, and
+search paths against real Lean processes.
 
 ## License
 

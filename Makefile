@@ -1,27 +1,18 @@
 .PHONY: test test-live lint license-check hooks
 
+OFFLINE_TESTS := $(filter-out test/test_live.vim,$(sort $(wildcard test/test_*.vim)))
+
 test: license-check
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_abbreviations.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_backoff.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_completion.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_editor.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_indent.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_infoview_lifecycle.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_inlayhints.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_plugin.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_progress.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_request_queue.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_request_sync.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_runtime_lifecycle.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_full_sync.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_stale_imports.vim < /dev/null
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_util.vim < /dev/null
+	@for lean_test_script in $(OFFLINE_TESTS); do \
+		python3 test/run_vim.py "$$lean_test_script" || exit $$?; \
+	done
 
 test-live:
-	vim -Nu NONE -i NONE -n -es -V1 -S test/test_live.vim < /dev/null
+	python3 test/run_vim.py test/test_live.vim
 
 lint:
-	vim -Nu NONE -i NONE -n -es -V1 -S test/lint.vim < /dev/null
+	python3 test/check_architecture.py
+	python3 test/run_vim.py test/lint.vim
 
 license-check:
 	sh test/check_licenses.sh

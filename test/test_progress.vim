@@ -7,13 +7,14 @@ delete(rpc_log)
 writefile(['-- filler line']->repeat(3000), fixture)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   completion: {autotrigger: false},
   inlay_hints: {enable: false},
   semantic_highlighting: {links: {variable: 'Identifier'}},
   lsp: {
-    command: ['python3', root .. '/test/support/fake_lean_server.py', rpc_log],
+    command: ['python3', root .. '/test/support/fake_lean_server.py', rpc_log, '2', 'ready', 'progress'],
     change_delay: 0,
     stderr: false,
   },
@@ -23,24 +24,13 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit! ' .. fnameescape(fixture)
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 3000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def ProgressSigns(): list<any>
   var placed = sign_getplaced(bufnr(), {group: 'lean-progress'})
   return empty(placed) ? [] : placed[0].signs
 enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'progress fake server did not initialize')
 
 # semantic_highlighting.links re-enables a token type that is quiet by
@@ -52,7 +42,7 @@ assert_true(empty(prop_type_get('LeanSemantic_property')),
 
 # The server reports the whole 3000-line file as processing; only the
 # visible span (plus a 20-line margin) may receive signs.
-assert_true(WaitFor(() => !empty(ProgressSigns())), 'no progress signs were placed')
+assert_true(harness.WaitFor(() => !empty(ProgressSigns())), 'no progress signs were placed')
 assert_true(lean#lsp#ProgressAt(bufnr(), 2500),
   'progress data should still cover the whole file')
 var window_info = getwininfo(win_getid())[0]
@@ -126,15 +116,14 @@ lean#lsp#Notify(bufnr(), 'test/progress', {
     {range: {start: {line: 0, character: 0}, end: {line: 1500, character: 0}}},
   ],
 })
-assert_true(WaitFor(() => lean#lsp#ProgressSummary(bufnr()).percent == 75),
+assert_true(harness.WaitFor(() => lean#lsp#ProgressSummary(bufnr()).percent == 75),
   'processing percentages counted overlapping ranges more than once')
 assert_true(lean#lsp#ProgressAt(bufnr(), 2249))
 assert_false(lean#lsp#ProgressAt(bufnr(), 2250), 'progress included the exclusive end line')
 lnums = mapnew(ProgressSigns(), (_, sign) => sign.lnum)
 assert_equal(len(lnums), len(uniq(sort(copy(lnums), 'n'))), 'processing ranges placed duplicate signs')
 
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 
 if !empty(v:errors)
   for error in v:errors

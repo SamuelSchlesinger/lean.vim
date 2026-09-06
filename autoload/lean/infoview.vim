@@ -2,10 +2,14 @@ vim9script
 
 import autoload 'lean/config.vim' as config
 import autoload 'lean/lsp.vim' as lsp
+import autoload 'lean/requests.vim' as requests
+import autoload 'lean/pins.vim' as pins
+import autoload 'lean/infoview_render.vim' as renderer
 import autoload 'lean/util.vim' as util
 
 var views: dict<any> = {}
 var next_view_id = 1
+var popup_scope = requests.NewScope()
 
 def ViewKey(): string
   var tabnr = tabpagenr()
@@ -31,29 +35,45 @@ def IsVisibleAnywhere(view: dict<any>): bool
 enddef
 
 def CancelGoalRequests(view: dict<any>)
-  for field in ['goal_request', 'term_request']
-    var request_id = get(view, field, -1)
-    if request_id > 0
-      lsp.Cancel(view.source_bufnr, request_id)
-    endif
-    view[field] = -1
-  endfor
+  requests.Cancel(view.scope)
 enddef
 
 def CancelPinRequests(view: dict<any>)
-  for request_id in get(view, 'pin_requests', [])
-    lsp.Cancel(view.source_bufnr, request_id)
+  for pin in view.pins
+    pins.Suspend(pin)
   endfor
-  view.pin_requests = []
+enddef
+
+export def RefreshPins(bufnr: number)
+  for view in values(views)
+    if !IsVisibleAnywhere(view)
+      continue
+    endif
+    var Changed = function(Render, [view])
+    for pin in view.pins
+      if pin.bufnr == bufnr && !view.paused
+        pins.Refresh(pin, Changed)
+      endif
+    endfor
+    Render(view)
+  endfor
+enddef
+
+export def InvalidatePins(bufnr: number)
+  for view in values(views)
+    for pin in view.pins
+      if pin.bufnr == bufnr
+        pins.Suspend(pin)
+      endif
+    endfor
+  endfor
 enddef
 
 def SetSource(view: dict<any>, bufnr: number, winid: number): bool
   var changed = view.source_bufnr != bufnr || view.source_winid != winid
   if view.source_bufnr != bufnr
     CancelGoalRequests(view)
-    CancelPinRequests(view)
     view.sequence += 1
-    view.pin_generation += 1
   endif
   view.source_bufnr = bufnr
   view.source_winid = winid
@@ -132,199 +152,40 @@ def SetLines(view: dict<any>, lines: list<string>)
   setbufvar(view.bufnr, '&modified', false)
 enddef
 
-def GoalLines(result: any): list<string>
-  if type(result) != v:t_dict
-    return []
-  endif
-  var goals = get(result, 'goals', v:null)
-  if type(goals) == v:t_list
-    if empty(goals)
-      var accomplished = config.Get().infoview.no_goals_text
-      return [empty(accomplished) ? 'No goals.' : accomplished]
-    endif
-    var lines: list<string> = []
-    if len(goals) > 1
-      add(lines, $'{len(goals)} goals')
-      add(lines, '')
-    endif
-    for goal in goals
-      if !empty(lines) && !empty(lines[-1])
-        add(lines, '')
-      endif
-      var rendered_goal = type(goal) == v:t_string ? goal : string(goal)
-      extend(lines, split(rendered_goal, "\n", true))
-    endfor
-    return lines
-  endif
-  var rendered = get(result, 'rendered', '')
-  return type(rendered) == v:t_string && !empty(rendered)
-    ? split(rendered, "\n", true)
-    : []
-enddef
-
-# One rendered block per diagnostic: header line, indented body, and the
-# source position <CR> should jump to.
-def DiagnosticBlocks(diagnostics: list<any>): list<dict<any>>
-  var blocks: list<dict<any>> = []
-  var labels = {1: 'error', 2: 'warning', 3: 'information', 4: 'hint'}
-  for diagnostic in diagnostics
-    if type(diagnostic) != v:t_dict
-      continue
-    endif
-    var severity = get(diagnostic, 'severity', 1)
-    var label = type(severity) == v:t_number
-      ? get(labels, severity, 'error')
-      : 'error'
-    var message = get(diagnostic, 'message', '')
-    if type(message) != v:t_string
-      continue
-    endif
-    var target: dict<any> = {}
-    var range = get(diagnostic, 'range', {})
-    if type(range) == v:t_dict
-        && type(get(range, 'start', v:null)) == v:t_dict
-        && type(get(range.start, 'line', v:null)) == v:t_number
-        && type(get(range.start, 'character', v:null)) == v:t_number
-        && range.start.line >= 0 && range.start.character >= 0
-      target = {line: range.start.line, character: range.start.character}
-    endif
-    add(blocks, {
-      header: $'▼ {label}:',
-      body: mapnew(split(message, "\n", true), (_, line) => '  ' .. line),
-      target: target,
-    })
+def Snapshot(view: dict<any>): dict<any>
+  var snapshot = {source_loaded: bufloaded(view.source_bufnr),
+    source_name: fnamemodify(bufname(view.source_bufnr), ':t'),
+    position: copy(view.position), goal: copy(view.goal), term_goal: copy(view.term_goal),
+    diff_pin: copy(view.diff_pin), diagnostics: deepcopy(view.diagnostics),
+    processing: view.processing, pins: []}
+  var source_uri = util.UriFromBuf(view.source_bufnr)
+  for live_pin in view.pins
+    var pin = pins.Snapshot(live_pin)
+    add(snapshot.pins, {uri: pin.uri, line: pin.line, character: pin.character,
+      lines: copy(pin.lines), label: pin.uri ==# source_uri ? ''
+        : fnamemodify(util.PathFromUri(pin.uri), ':~:.') .. ' '})
   endfor
-  return blocks
-enddef
-
-def DiagnosticLines(diagnostics: list<any>): list<string>
-  var lines: list<string> = []
-  for block in DiagnosticBlocks(diagnostics)
-    add(lines, block.header)
-    extend(lines, block.body)
-  endfor
-  return lines
-enddef
-
-def DiffLines(before: list<string>, after: list<string>): list<string>
-  if empty(before) || before ==# after
-    return []
-  endif
-  var lines = ['Changes from diff pin:']
-  var maximum = max([len(before), len(after)])
-  for index in range(maximum)
-    var old_line = index < len(before) ? before[index] : v:null
-    var new_line = index < len(after) ? after[index] : v:null
-    if old_line ==# new_line
-      continue
-    endif
-    if type(old_line) == v:t_string
-      add(lines, '- ' .. old_line)
-    endif
-    if type(new_line) == v:t_string
-      add(lines, '+ ' .. new_line)
-    endif
-  endfor
-  return lines
+  return snapshot
 enddef
 
 def Render(view: dict<any>)
-  var lines: list<string> = []
-  var targets: dict<any> = {}
-  if !bufloaded(view.source_bufnr)
-    view.line_targets = {}
-    SetLines(view, ['The Lean source buffer is no longer loaded.'])
-    return
-  endif
-
-  add(lines, fnamemodify(bufname(view.source_bufnr), ':t') ..
-    $'  {view.position.line + 1}:{view.position.character + 1}')
-  targets[len(lines)] = {line: view.position.line, character: view.position.character}
-  add(lines, repeat('─', 32))
-
-  for pin in view.pins
-    var pin_path = util.PathFromUri(pin.uri)
-    var source_label = pin.uri ==# util.UriFromBuf(view.source_bufnr)
-      ? '' : fnamemodify(pin_path, ':~:.') .. ' '
-    add(lines, $'Pin {source_label}{pin.line + 1}:{pin.character + 1}')
-    targets[len(lines)] = {line: pin.line, character: pin.character, uri: pin.uri}
-    extend(lines, pin.lines)
-    add(lines, '')
-  endfor
-
-  var diff = DiffLines(view.diff_pin, view.goal)
-  if !empty(diff)
-    extend(lines, diff)
-    add(lines, '')
-  endif
-
-  if view.processing && config.Get().infoview.show_processing
-    add(lines, 'Processing file...')
-  endif
-  if !empty(view.goal)
-    extend(lines, view.goal)
-  elseif !view.processing && config.Get().infoview.show_no_info
-    add(lines, 'No goals.')
-  endif
-
-  if !empty(view.term_goal)
-    if !empty(lines) && !empty(lines[-1])
-      add(lines, '')
-    endif
-    add(lines, 'Expected type:')
-    extend(lines, view.term_goal)
-  endif
-
-  if !empty(view.diagnostics)
-    if !empty(lines) && !empty(lines[-1])
-      add(lines, '')
-    endif
-    for block in DiagnosticBlocks(view.diagnostics)
-      add(lines, block.header)
-      if !empty(block.target)
-        targets[len(lines)] = block.target
-      endif
-      extend(lines, block.body)
-    endfor
-  endif
-  view.line_targets = targets
-  SetLines(view, lines)
+  var rendered = renderer.Build(Snapshot(view), config.Get().infoview)
+  view.line_targets = rendered.targets
+  SetLines(view, rendered.lines)
 enddef
 
-def OnGoal(key: string, sequence: number, request_id: number,
-    result: any, error: any)
-  if !has_key(views, key) || views[key].sequence != sequence
-    return
-  endif
-  var view = views[key]
-  if getbufvar(view.source_bufnr, 'changedtick', -1) != get(view, 'changedtick', -2)
-    return
-  endif
-  if view.goal_request == request_id
-    view.goal_request = -1
-  endif
+def OnGoal(view: dict<any>, result: any, error: any)
   if type(error) == v:t_dict
     var message = get(error, 'message', string(error))
     view.goal = [$'Goal error: {type(message) == v:t_string ? message : string(message)}']
   else
-    view.goal = GoalLines(result)
+    view.goal = renderer.GoalLines(result, config.Get().infoview.no_goals_text)
   endif
   view.processing = lsp.ProgressAt(view.source_bufnr, view.position.line)
   Render(view)
 enddef
 
-def OnTermGoal(key: string, sequence: number, request_id: number,
-    result: any, error: any)
-  if !has_key(views, key) || views[key].sequence != sequence
-    return
-  endif
-  var view = views[key]
-  if getbufvar(view.source_bufnr, 'changedtick', -1) != get(view, 'changedtick', -2)
-    return
-  endif
-  if view.term_request == request_id
-    view.term_request = -1
-  endif
+def OnTermGoal(view: dict<any>, result: any, error: any)
   if type(error) == v:t_dict || type(result) != v:t_dict
     view.term_goal = []
   else
@@ -351,8 +212,7 @@ export def Open(bufnr: number = bufnr())
       source_bufnr: bufnr,
       source_winid: source_winid,
       sequence: 0,
-      goal_request: -1,
-      term_request: -1,
+      scope: requests.NewScope(),
       timer: -1,
       pending_bufnr: -1,
       position: util.Position(bufnr),
@@ -360,8 +220,6 @@ export def Open(bufnr: number = bufnr())
       term_goal: [],
       diagnostics: [],
       pins: [],
-      pin_generation: 0,
-      pin_requests: [],
       line_targets: {},
       diff_pin: [],
       auto_diff: false,
@@ -377,6 +235,11 @@ export def Open(bufnr: number = bufnr())
     win_gotoid(source_winid)
   endif
   Update(bufnr)
+  for pin in view.pins
+    if !view.paused
+      pins.Refresh(pin, () => Render(view))
+    endif
+  endfor
 enddef
 
 # Follow a Lean window which became active without reopening an infoview that
@@ -409,7 +272,6 @@ export def Close()
     endif
     view.pending_bufnr = -1
     view.sequence += 1
-    view.pin_generation += 1
     CancelGoalRequests(view)
     CancelPinRequests(view)
   endif
@@ -426,7 +288,6 @@ export def CloseAll()
     endif
     view.pending_bufnr = -1
     view.sequence += 1
-    view.pin_generation += 1
     CancelGoalRequests(view)
     CancelPinRequests(view)
     if get(view, 'bufnr', -1) <= 0
@@ -548,7 +409,6 @@ def UpdateView(key: string, bufnr: number)
   endif
   CancelGoalRequests(view)
   view.sequence += 1
-  var sequence = view.sequence
   var source_line = view.position.line + 1
   var source_column = 0
   var found_source_cursor = false
@@ -572,7 +432,6 @@ def UpdateView(key: string, bufnr: number)
   view.diagnostics = lsp.DiagnosticsAt(bufnr, view.position.line)
   view.goal = []
   view.term_goal = []
-  view.changedtick = getbufvar(bufnr, 'changedtick', -1)
   Render(view)
 
   var params = {
@@ -581,14 +440,11 @@ def UpdateView(key: string, bufnr: number)
   }
   var goal_params = deepcopy(params)
   goal_params.position.character += 1
-  var goal_request = -1
-  goal_request = lsp.Request(bufnr, '$/lean/plainGoal', goal_params,
-    (result, error) => OnGoal(key, sequence, goal_request, result, error))
-  view.goal_request = goal_request
-  var term_request = -1
-  term_request = lsp.Request(bufnr, '$/lean/plainTermGoal', params,
-    (result, error) => OnTermGoal(key, sequence, term_request, result, error))
-  view.term_request = term_request
+  var context = requests.Begin(view.scope, bufnr)
+  requests.Send(context, '$/lean/plainGoal', goal_params,
+    (result, error) => OnGoal(view, result, error))
+  requests.Send(context, '$/lean/plainTermGoal', params,
+    (result, error) => OnTermGoal(view, result, error))
 enddef
 
 export def Update(bufnr: number = bufnr())
@@ -633,30 +489,24 @@ export def ScheduleUpdate(bufnr: number = bufnr())
   view.timer = timer_start(cooldown, (_) => TimerUpdate(key))
 enddef
 
-def OnPopupGoal(title: string, context: dict<any>, result: any, error: any)
-  if !util.ContextIsCurrent(context)
-    return
-  endif
+def OnPopupGoal(title: string, result: any, error: any)
   if type(error) == v:t_dict
     var message = get(error, 'message', string(error))
     util.Popup(title, [type(message) == v:t_string ? message : string(message)])
   else
-    util.Popup(title, GoalLines(result))
+    util.Popup(title, renderer.GoalLines(result, config.Get().infoview.no_goals_text))
   endif
 enddef
 
 export def ShowGoal(bufnr: number = bufnr())
-  var context = util.CursorContext()
+  var context = requests.Begin(popup_scope, bufnr, true)
   var params = util.PositionParams(bufnr)
   params.position.character += 1
-  lsp.Request(bufnr, '$/lean/plainGoal', params,
-    (result, error) => OnPopupGoal('Lean goal', context, result, error))
+  requests.Send(context, '$/lean/plainGoal', params,
+    (result, error) => OnPopupGoal('Lean goal', result, error))
 enddef
 
-def OnPopupTermGoal(context: dict<any>, result: any, error: any)
-  if !util.ContextIsCurrent(context)
-    return
-  endif
+def OnPopupTermGoal(result: any, error: any)
   if type(error) == v:t_dict
     var message = get(error, 'message', string(error))
     util.Popup('Lean term goal', [type(message) == v:t_string ? message : string(message)])
@@ -669,14 +519,14 @@ def OnPopupTermGoal(context: dict<any>, result: any, error: any)
 enddef
 
 export def ShowTermGoal(bufnr: number = bufnr())
-  var context = util.CursorContext()
-  lsp.Request(bufnr, '$/lean/plainTermGoal', util.PositionParams(bufnr),
-    (result, error) => OnPopupTermGoal(context, result, error))
+  var context = requests.Begin(popup_scope, bufnr, true)
+  requests.Send(context, '$/lean/plainTermGoal', util.PositionParams(bufnr),
+    (result, error) => OnPopupTermGoal(result, error))
 enddef
 
 export def ShowLineDiagnostics(bufnr: number = bufnr())
   var diagnostics = lsp.DiagnosticsAt(bufnr, line('.') - 1)
-  var lines = DiagnosticLines(diagnostics)
+  var lines = renderer.DiagnosticLines(diagnostics)
   if empty(lines) && lsp.ProgressAt(bufnr, line('.') - 1)
     lines = ['Processing file...']
   endif
@@ -701,32 +551,6 @@ export def RefreshServerState()
   endfor
 enddef
 
-def OnPin(key: string, source_bufnr: number, generation: number,
-    request_id: number, uri: string, line_index: number, character: number,
-    result: any, error: any)
-  if !has_key(views, key)
-    return
-  endif
-  var view = views[key]
-  var request_index = index(view.pin_requests, request_id)
-  if request_index >= 0
-    remove(view.pin_requests, request_index)
-  endif
-  if type(error) == v:t_dict
-    return
-  endif
-  if view.source_bufnr != source_bufnr || view.pin_generation != generation
-    return
-  endif
-  add(view.pins, {
-    uri: uri,
-    line: line_index,
-    character: character,
-    lines: GoalLines(result),
-  })
-  Render(view)
-enddef
-
 export def AddPin(bufnr: number = bufnr())
   if getbufvar(bufnr, '&filetype') !=# 'lean'
     util.Notify('pins can only be added from a Lean buffer')
@@ -740,27 +564,21 @@ export def AddPin(bufnr: number = bufnr())
       return
     endif
   endif
-  var params = util.PositionParams(bufnr)
-  var line_index = params.position.line
-  var character = params.position.character
-  var uri = params.textDocument.uri
-  params.position.character += 1
-  var key = ViewKey()
-  var generation = view.pin_generation
-  var request_id = -1
-  request_id = lsp.Request(bufnr, '$/lean/plainGoal', params,
-    (result, error) => OnPin(key, bufnr, generation, request_id,
-      uri, line_index, character, result, error))
-  if request_id > 0
-    add(view.pin_requests, request_id)
+  var pin = pins.New(bufnr, util.Position(bufnr))
+  add(view.pins, pin)
+  if !view.paused
+    pins.Refresh(pin, () => Render(view))
   endif
+  Render(view)
 enddef
 
 export def ClearPins()
   var view = CurrentView()
   if !empty(view)
-    view.pin_generation += 1
     CancelPinRequests(view)
+    for pin in view.pins
+      pins.Remove(pin)
+    endfor
     view.pins = []
     Render(view)
   endif
@@ -778,10 +596,14 @@ export def TogglePause()
       view.pending_bufnr = -1
       view.sequence += 1
       CancelGoalRequests(view)
+      CancelPinRequests(view)
     endif
     util.Notify(view.paused ? 'infoview updates paused' : 'infoview updates resumed', 'ModeMsg')
     if !view.paused
       UpdateView(ViewKey(), view.source_bufnr)
+      for pin in view.pins
+        pins.Refresh(pin, () => Render(view))
+      endfor
     endif
   endif
 enddef
@@ -823,7 +645,12 @@ export def Debug()
 enddef
 
 export def State(): dict<any>
-  return deepcopy(CurrentView())
+  var state = copy(CurrentView())
+  if !empty(state)
+    remove(state, 'scope')
+    state.pins = mapnew(state.pins, (_, pin) => pins.Snapshot(pin))
+  endif
+  return deepcopy(state)
 enddef
 
 export def HasView(): bool
@@ -847,9 +674,11 @@ export def PruneClosedTabs()
       timer_stop(view.timer)
     endif
     view.sequence += 1
-    view.pin_generation += 1
     CancelGoalRequests(view)
     CancelPinRequests(view)
+    for pin in view.pins
+      pins.Remove(pin)
+    endfor
     var info_bufnr = get(view, 'bufnr', -1)
     if info_bufnr > 0 && bufexists(info_bufnr)
       execute $'silent! bwipeout! {info_bufnr}'

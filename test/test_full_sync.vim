@@ -5,6 +5,7 @@ var rpc_log = root .. '/test-full-sync-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
@@ -19,29 +20,18 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'full-sync fake server did not initialize')
 var source = bufnr()
 var previous_version = getbufvar(source, 'lean_lsp_version', 0)
 setline(2, '  exact 43')
 lean#OnChanged(source)
-assert_true(WaitFor(() => getbufvar(source, 'lean_lsp_version', 0) > previous_version),
+assert_true(harness.WaitFor(() => getbufvar(source, 'lean_lsp_version', 0) > previous_version),
   'full-sync document change was not flushed')
 var expected_text = lean#util#BufText(source)
 sleep 20m
-lean#Stop()
+harness.Stop(rpc_log)
 
 var messages = mapnew(filereadable(rpc_log) ? readfile(rpc_log) : [],
   (_, line) => json_decode(line))

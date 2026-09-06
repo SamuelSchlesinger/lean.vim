@@ -5,11 +5,12 @@ var rpc_log = root .. '/test-stale-imports-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
   lsp: {
-    command: ['python3', root .. '/test/support/fake_lean_server.py', rpc_log],
+    command: ['python3', root .. '/test/support/fake_lean_server.py', rpc_log, '2', 'ready', 'stale-once'],
     change_delay: 10,
     stderr: false,
   },
@@ -21,17 +22,6 @@ filetype plugin indent on
 # trip E37.
 set hidden
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def CountFor(method: string, name: string): number
   var count = 0
@@ -49,14 +39,14 @@ enddef
 # The server reports stale imports once; the plugin restarts the file
 # automatically and the rebuilt imports come back clean.
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/StaleImportsFixed.lean')
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'stale-imports fake server did not initialize')
 var fixed_uri = lean#util#UriFromBuf(bufnr())
-assert_true(WaitFor(() => CountFor('textDocument/didOpen', 'StaleImportsFixed') >= 2),
+assert_true(harness.WaitFor(() => CountFor('textDocument/didOpen', 'StaleImportsFixed') >= 2),
   'stale imports did not trigger an automatic file restart')
 assert_equal(1, CountFor('textDocument/didClose', 'StaleImportsFixed'),
   'automatic restart did not close the document first')
-assert_true(WaitFor(() => empty(lean#lsp#Diagnostics(fixed_uri))),
+assert_true(harness.WaitFor(() => empty(lean#lsp#Diagnostics(fixed_uri))),
   'diagnostics did not clear after the automatic restart')
 
 # Imports going stale again later (an imported module was edited or saved)
@@ -64,7 +54,7 @@ assert_true(WaitFor(() => empty(lean#lsp#Diagnostics(fixed_uri))),
 # into a background rebuild.  The diagnostic alone is the signal.
 setline(3, 'def more : Nat := 3')
 lean#OnChanged(bufnr())
-assert_true(WaitFor(() => !empty(lean#lsp#Diagnostics(fixed_uri))),
+assert_true(harness.WaitFor(() => !empty(lean#lsp#Diagnostics(fixed_uri))),
   'the reappearing stale diagnostic was not published')
 sleep 200m
 assert_equal(2, CountFor('textDocument/didOpen', 'StaleImportsFixed'),
@@ -72,9 +62,12 @@ assert_equal(2, CountFor('textDocument/didOpen', 'StaleImportsFixed'),
 
 # A server that keeps reporting stale imports gets exactly one automatic
 # restart, not a reopen loop.
+var profiles: dict<any> = {}
+profiles[lean#util#UriFromPath(root .. '/test/fixtures/StaleImportsBroken.lean')] = 'stale-always'
+lean#lsp#Notify(bufnr(), 'test/configure', {documents: profiles})
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/StaleImportsBroken.lean')
 var broken_uri = lean#util#UriFromBuf(bufnr())
-assert_true(WaitFor(() => CountFor('textDocument/didOpen', 'StaleImportsBroken') >= 2),
+assert_true(harness.WaitFor(() => CountFor('textDocument/didOpen', 'StaleImportsBroken') >= 2),
   'persistently stale imports did not get their one automatic restart')
 sleep 200m
 assert_equal(2, CountFor('textDocument/didOpen', 'StaleImportsBroken'),
@@ -83,7 +76,7 @@ assert_false(empty(lean#lsp#Diagnostics(broken_uri)),
   'the stale-imports diagnostic was dropped while still applicable')
 
 lean#Stop()
-assert_true(WaitFor(() => CountFor('exit', '') == 1),
+assert_true(harness.WaitFor(() => CountFor('exit', '') == 1),
   'stale-imports server did not finish the shutdown handshake')
 delete(rpc_log)
 

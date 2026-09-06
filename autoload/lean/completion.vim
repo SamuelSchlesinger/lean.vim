@@ -2,6 +2,7 @@ vim9script
 
 import autoload 'lean/config.vim' as config
 import autoload 'lean/lsp.vim' as lsp
+import autoload 'lean/requests.vim' as requests
 import autoload 'lean/util.vim' as util
 
 # Asynchronous LSP completion. The omnifunc's second call issues the request
@@ -10,12 +11,14 @@ import autoload 'lean/util.vim' as util
 # Lean elaboration can block replies for seconds, so nothing here ever waits.
 # The as-you-type popup shares the same request/show path.
 
+var completion_scope = requests.NewScope()
+var resolve_scope = requests.NewScope()
 var generation = 0
 var session: dict<any> = {}
 var pending_trigger = ''
 var debounce_timer = -1
 var timeout_timer = -1
-var resolve_state: dict<any> = {request_id: -1, timer: -1, index: -1}
+var resolve_state: dict<any> = {timer: -1, index: -1}
 
 # LSP CompletionItemKind → single-letter pum kind. Lean reports theorems as
 # kind 23 (Event), so 23 maps to 't'.
@@ -63,10 +66,7 @@ def CancelResolve()
     timer_stop(resolve_state.timer)
     resolve_state.timer = -1
   endif
-  if resolve_state.request_id > 0 && !empty(session)
-    lsp.Cancel(session.bufnr, resolve_state.request_id)
-  endif
-  resolve_state.request_id = -1
+  requests.Cancel(resolve_scope)
   resolve_state.index = -1
 enddef
 
@@ -74,10 +74,7 @@ def CancelInflight()
   StopTimer('debounce')
   StopTimer('timeout')
   CancelResolve()
-  if !empty(session) && get(session, 'request_id', -1) > 0
-    lsp.Cancel(session.bufnr, session.request_id)
-    session.request_id = -1
-  endif
+  requests.Cancel(completion_scope)
 enddef
 
 def Reset()
@@ -109,7 +106,7 @@ def Start(bufnr: number, source: string)
   if type(get(lsp.Capabilities(bufnr), 'completionProvider', v:null)) != v:t_dict
     return
   endif
-  lsp.Flush(bufnr)
+  var context = requests.Begin(completion_scope, bufnr)
   generation += 1
   var request_generation = generation
   var params = util.PositionParams(bufnr)
@@ -122,11 +119,11 @@ def Start(bufnr: number, source: string)
   endif
   session = {
     bufnr: bufnr,
+    context: context,
     generation: request_generation,
     source: source,
     lnum: line('.'),
     col: col('.'),
-    tick: b:changedtick,
     uri: util.UriFromBuf(bufnr),
     original: util.BufText(bufnr),
     request_id: -1,
@@ -135,17 +132,17 @@ def Start(bufnr: number, source: string)
     is_incomplete: false,
     shown: false,
   }
-  session.request_id = lsp.Request(bufnr, 'textDocument/completion', params,
+  session.request_id = requests.Send(context, 'textDocument/completion', params,
     (result, error) => OnResult(request_generation, result, error))
   timeout_timer = timer_start(max([1, config.Get().completion.timeout]),
-    (_) => CancelTimedOut(bufnr, request_generation))
+    (_) => CancelTimedOut(request_generation))
 enddef
 
-def CancelTimedOut(bufnr: number, request_generation: number)
+def CancelTimedOut(request_generation: number)
   timeout_timer = -1
   if !empty(session) && session.generation == request_generation
       && session.request_id > 0
-    lsp.Cancel(bufnr, session.request_id)
+    requests.Cancel(completion_scope)
     session.request_id = -1
   endif
 enddef
@@ -185,7 +182,7 @@ def Show(request_generation: number)
       || getbufvar(bufnr, 'lean_abbrev_active', false)
     return
   endif
-  if b:changedtick != session.tick || line('.') != session.lnum
+  if !requests.IsCurrent(session.context) || line('.') != session.lnum
       || col('.') != session.col
     return
   endif
@@ -549,13 +546,13 @@ def RequestResolve(bufnr: number, index: number)
   endif
   var request_generation = session.generation
   resolve_state.index = index
-  resolve_state.request_id = lsp.Request(bufnr, 'completionItem/resolve',
+  var context = requests.Begin(resolve_scope, bufnr)
+  requests.Send(context, 'completionItem/resolve',
     deepcopy(session.items[index]),
-    (result, error) => OnResolved(request_generation, index, result, error))
+    (result, error) => OnResolved(request_generation, index, result, error), false)
 enddef
 
 def OnResolved(request_generation: number, index: number, result: any, error: any)
-  resolve_state.request_id = -1
   if empty(session) || session.generation != request_generation
       || type(error) == v:t_dict || type(result) != v:t_dict
     return

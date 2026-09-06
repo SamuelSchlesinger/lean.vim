@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-import time
 from typing import Any, BinaryIO
 
 
@@ -14,8 +13,14 @@ stream_in: BinaryIO = sys.stdin.buffer
 stream_out: BinaryIO = sys.stdout.buffer
 log_path = pathlib.Path(sys.argv[1])
 sync_kind = int(sys.argv[2]) if len(sys.argv) > 2 else 2
-initialize_delay = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
-emit_open_notifications = bool(int(sys.argv[4])) if len(sys.argv) > 4 else True
+startup = sys.argv[3] if len(sys.argv) > 3 else "ready"
+notification_profile = sys.argv[4] if len(sys.argv) > 4 else "basic"
+profiles: dict[str, dict[str, Any]] = {}
+plans: dict[str, list[dict[str, Any]]] = {}
+active_rules: dict[int, dict[str, Any]] = {}
+held: dict[str, list[dict[str, Any]]] = {}
+document_profiles: dict[str, str] = {}
+documents: dict[str, str] = {}
 
 
 def log(message: dict[str, Any]) -> None:
@@ -51,7 +56,15 @@ def read_message() -> dict[str, Any] | None:
 
 
 def response(request: dict[str, Any], result: Any) -> None:
-    send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+    rule = active_rules.pop(request["id"], {})
+    reply = {"jsonrpc": "2.0", "id": request["id"], "result": rule.get("result", result)}
+    if "error" in rule:
+        reply.pop("result")
+        reply["error"] = rule["error"]
+    if rule.get("hold"):
+        held.setdefault(rule["hold"], []).append(reply)
+    else:
+        send(reply)
 
 
 last_opened_uri = ""
@@ -70,12 +83,14 @@ def message_uri_fallback(message: dict[str, Any]) -> str:
 
 def handle_request(message: dict[str, Any]) -> None:
     method = message["method"]
-    if (method in {"textDocument/definition", "textDocument/hover", "textDocument/documentSymbol"}
-            and message.get("params", {}).get("textDocument", {}).get("uri", "").endswith("/Editor.lean")):
-        time.sleep(0.1)
-    if method == "initialize":
-        if initialize_delay:
-            time.sleep(initialize_delay)
+    rule = plans.get(method, []).pop(0) if plans.get(method) else dict(profiles.get(method, {}))
+    if method == "initialize" and startup == "hold-initialize":
+        rule["hold"] = "initialize"
+    active_rules[message["id"]] = rule
+    scenario = rule.get("scenario", "default")
+    if method == "test/barrier":
+        response(message, None)
+    elif method == "initialize":
         response(
             message,
             {
@@ -105,10 +120,7 @@ def handle_request(message: dict[str, Any]) -> None:
     elif method == "textDocument/completion":
         position = message["params"]["position"]
         line = position["line"]
-        if line == 3:
-            # Slow reply: lets the client supersede and cancel this request.
-            time.sleep(0.4)
-        if line in {6, 7, 8, 9, 10}:
+        if scenario in {"replace-suffix", "insert-range", "multiline", "insert-text", "mixed-ranges"}:
             edit_range = {
                 "start": {"line": line, "character": 3},
                 "end": {"line": line, "character": 10},
@@ -118,13 +130,13 @@ def handle_request(message: dict[str, Any]) -> None:
                 "filterText": "abc",
                 "textEdit": {"range": edit_range, "newText": "replacement"},
             }
-            if line == 7:
+            if scenario == "insert-range":
                 item["textEdit"] = {
                     "insert": {"start": edit_range["start"], "end": position},
                     "replace": edit_range,
                     "newText": "inserted",
                 }
-            elif line == 8:
+            elif scenario == "multiline":
                 item["textEdit"]["newText"] = "first\nsecond"
                 item["additionalTextEdits"] = [{
                     "range": {
@@ -133,15 +145,15 @@ def handle_request(message: dict[str, Any]) -> None:
                     },
                     "newText": "-- imported\n",
                 }]
-            elif line == 9:
+            elif scenario == "insert-text":
                 item["label"] = "abc"
                 del item["filterText"]
                 item["insertText"] = "different"
                 del item["textEdit"]
-            elif line == 10:
+            elif scenario == "mixed-ranges":
                 item["textEdit"]["range"]["start"]["character"] = 0
             items = [item]
-            if line == 10:
+            if scenario == "mixed-ranges":
                 items.insert(0, {
                     "label": "abcd", "textEdit": {
                         "range": {"start": {"line": line, "character": 3}, "end": position},
@@ -149,7 +161,7 @@ def handle_request(message: dict[str, Any]) -> None:
                     }, "sortText": "0",
                 })
             response(message, {"items": items, "isIncomplete": False})
-        elif line == 1:
+        elif scenario == "unicode-prefix":
             # The fixture line is `-- α😊abc`; the edit starts at the α
             # (UTF-16 unit 3), before the client's local word start, and the
             # replacement keeps the typed base as its prefix so Vim's popup
@@ -164,9 +176,9 @@ def handle_request(message: dict[str, Any]) -> None:
                             "kind": 6,
                             "textEdit": {
                                 "range": {
-                                    "start": {"line": 1, "character": 3},
+                                    "start": {"line": line, "character": 3},
                                     "end": {
-                                        "line": 1,
+                                        "line": line,
                                         "character": position["character"],
                                     },
                                 },
@@ -180,7 +192,7 @@ def handle_request(message: dict[str, Any]) -> None:
             response(
                 message,
                 {
-                    "isIncomplete": line == 5,
+                    "isIncomplete": scenario == "incomplete",
                     "items": [
                         {
                             "label": "succ",
@@ -239,18 +251,14 @@ def handle_request(message: dict[str, Any]) -> None:
     elif method == "$/lean/plainGoal":
         uri = message["params"]["textDocument"]["uri"]
         line = message["params"]["position"]["line"]
-        if (uri.endswith("/Editor.lean") or uri.endswith("/Basic.lean")) and line == 3:
-            time.sleep(0.1)
         goals = ["case test\n⊢ Nat"]
-        if uri.endswith("/Editor.lean") and line == 1:
+        if scenario == "two-goals":
             goals.append("case second\n⊢ Nat")
-        response(
-            message,
-            {
-                "rendered": "case test\n⊢ Nat",
-                "goals": goals,
-            },
-        )
+        if scenario == "source-goal":
+            text = documents.get(uri, "").splitlines()
+            source = text[line] if line < len(text) else ""
+            goals = [f"line {line + 1}, column {message['params']['position']['character']}\n{source}\n⊢ Nat"]
+        response(message, {"goals": goals})
     elif method == "$/lean/plainTermGoal":
         response(
             message,
@@ -298,7 +306,6 @@ def handle_request(message: dict[str, Any]) -> None:
     elif method == "textDocument/codeAction":
         response(message, [])
     elif method == "textDocument/rename":
-        time.sleep(0.1)
         response(message, {"changes": {message["params"]["textDocument"]["uri"]: [{
             "range": {"start": {"line": 0, "character": 4},
                       "end": {"line": 0, "character": 10}},
@@ -387,16 +394,18 @@ def opened(message: dict[str, Any]) -> None:
     global last_opened_uri
     document = message["params"]["textDocument"]
     last_opened_uri = document["uri"]
-    if not emit_open_notifications:
+    documents[document["uri"]] = document.get("text", "")
+    profile = document_profiles.get(document["uri"], notification_profile)
+    if profile == "none":
         return
     uri = document["uri"]
     version = document["version"]
-    if "StaleImports" in uri:
+    if profile in {"stale-once", "stale-always"}:
         # Lean's watchdog reports stale imports on the file's first line.
         # "Fixed" clears on reopen (imports were rebuilt); "Broken" reports
         # stale on every open, like a build that keeps failing.
         open_counts[uri] = open_counts.get(uri, 0) + 1
-        stale = "Broken" in uri or open_counts[uri] == 1
+        stale = profile == "stale-always" or open_counts[uri] == 1
         diagnostics = []
         if stale:
             diagnostics = [
@@ -421,7 +430,7 @@ def opened(message: dict[str, Any]) -> None:
             }
         )
         return
-    if "Progress" in uri:
+    if profile == "progress":
         # Whole-file processing, like Lean's first fileProgress notification.
         line_count = document.get("text", "").count("\n") + 1
         send(
@@ -499,7 +508,20 @@ def changed(message: dict[str, Any]) -> None:
     """Send a deliberately stale diagnostic to exercise client versioning."""
     document = message["params"]["textDocument"]
     version = document["version"]
-    if "StaleImports" in document["uri"]:
+    text = documents.get(document["uri"], "")
+    for change in message["params"]["contentChanges"]:
+        if "range" not in change:
+            text = change["text"]
+            continue
+        encoded = text.encode("utf-16-le")
+        lines = text.splitlines(keepends=True)
+        def offset(position: dict[str, int]) -> int:
+            return len("".join(lines[:position["line"]]).encode("utf-16-le")) + 2 * position["character"]
+        start = offset(change["range"]["start"])
+        end = offset(change["range"]["end"])
+        text = (encoded[:start] + change["text"].encode("utf-16-le") + encoded[end:]).decode("utf-16-le")
+    documents[document["uri"]] = text
+    if document_profiles.get(document["uri"], notification_profile) in {"stale-once", "stale-always"}:
         # Imports went stale again after the automatic refresh, like saving
         # a module that this file imports.
         send(
@@ -550,11 +572,33 @@ def changed(message: dict[str, Any]) -> None:
     )
 
 
+def control(message: dict[str, Any]) -> bool:
+    """Tests select scenarios and release replies; the reader never sleeps."""
+    method = message.get("method")
+    params = message.get("params") or {}
+    if method == "test/configure":
+        profiles.update(params.get("methods", {}))
+        document_profiles.update(params.get("documents", {}))
+    elif method == "test/plan":
+        plans[params["method"]] = list(params["responses"])
+    elif method == "test/release":
+        replies = held.pop(params["label"], [])
+        if params.get("reverse"):
+            replies.reverse()
+        for reply in replies:
+            send(reply)
+    else:
+        return False
+    return True
+
+
 while True:
     incoming = read_message()
     if incoming is None:
         break
     log(incoming)
+    if control(incoming):
+        continue
     if incoming.get("method") == "test/exit":
         sys.exit(1)
     if incoming.get("method") == "test/progress":

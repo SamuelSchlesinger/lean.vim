@@ -5,6 +5,7 @@ var rpc_log = root .. '/test-inlayhints-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
@@ -21,17 +22,6 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Completion.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 3000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def HintProps(): list<any>
   # The plugin creates its prop types lazily on the first refresh.
@@ -53,9 +43,9 @@ def HintRequestCount(): number
   return count
 enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'inlay-hint fake server did not initialize')
-assert_true(WaitFor(() => len(HintProps()) == 2),
+assert_true(harness.WaitFor(() => len(HintProps()) == 2),
   $'expected exactly the two valid hints, got {string(HintProps())}')
 
 # Byte-exact placement: line 1 char 7 → byte col 8; line 2 `-- α😊abc`
@@ -75,16 +65,16 @@ assert_equal('param:', get(props[1], 'text', ''), 'label parts were not concaten
 var requests_before = HintRequestCount()
 setline(3, 'def two := 22')
 doautocmd TextChanged
-assert_true(WaitFor(() => HintRequestCount() > requests_before),
+assert_true(harness.WaitFor(() => HintRequestCount() > requests_before),
   'editing the buffer did not re-request inlay hints')
-assert_true(WaitFor(() => len(HintProps()) == 2),
+assert_true(harness.WaitFor(() => len(HintProps()) == 2),
   'hints did not re-render after an edit')
 
 # Toggling clears and restores the rendered hints.
 LeanInlayHintsToggle
-assert_true(WaitFor(() => empty(HintProps())), 'toggle off did not clear hints')
+assert_true(harness.WaitFor(() => empty(HintProps())), 'toggle off did not clear hints')
 LeanInlayHintsToggle
-assert_true(WaitFor(() => len(HintProps()) == 2), 'toggle on did not restore hints')
+assert_true(harness.WaitFor(() => len(HintProps()) == 2), 'toggle on did not restore hints')
 
 # Widely separated splits should request their own visible ranges, rather
 # than asking Lean to elaborate all the hidden lines between them.
@@ -98,7 +88,7 @@ normal! zz
 redraw!
 requests_before = HintRequestCount()
 lean#inlayhints#Refresh(bufnr())
-assert_true(WaitFor(() => HintRequestCount() >= requests_before + 2),
+assert_true(harness.WaitFor(() => HintRequestCount() >= requests_before + 2),
   'distant splits did not get separate inlay-hint requests')
 var requests = filter(mapnew(readfile(rpc_log), (_, text) => json_decode(text)),
   (_, message) => get(message, 'method', '') ==# 'textDocument/inlayHint')[requests_before :]
@@ -112,8 +102,7 @@ assert_equal(2, len(HintProps()), 'combining distant hint ranges lost or duplica
 close
 
 # Detaching the server leaves no hint properties behind.
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 assert_true(empty(HintProps()), 'stopping the client left hint properties behind')
 
 if !empty(v:errors)

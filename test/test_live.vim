@@ -2,6 +2,7 @@ vim9script
 
 var root = fnamemodify(expand('<sfile>'), ':p:h:h')
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false, update_delay: 20},
   lsp: {stderr: false},
@@ -11,30 +12,37 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 10000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 20m
-    elapsed += 20
-  endwhile
-  return Predicate()
-enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'real Lean server did not initialize')
 cursor(2, 1)
 lean#InfoviewOpen()
-assert_true(WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
+assert_true(harness.WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
   'real Lean server did not return the expected tactic goal: ' .. string(lean#InfoviewState()))
+
+# A live pin follows an inserted line and re-elaborates when the expected
+# type changes. This verifies the feature against Lean, not just a JSON stub.
+lean#InfoviewAddPin()
+assert_true(harness.WaitFor(() => index(get(get(get(lean#InfoviewState(), 'pins', []), 0, {}), 'lines', []), '⊢ Nat') >= 0))
+var pinned_source = bufnr()
+append(0, '-- live pin movement')
+listener_flush(pinned_source)
+lean#OnChanged(pinned_source)
+assert_true(harness.WaitFor(() => lean#InfoviewState().pins[0].line == 2))
+setline(2, 'def answer : Bool := by')
+listener_flush(pinned_source)
+lean#OnChanged(pinned_source)
+assert_true(harness.WaitFor(() => index(lean#InfoviewState().pins[0].lines, '⊢ Bool') >= 0, 10000),
+  'real Lean pin did not refresh its expected type: ' .. string(lean#InfoviewState().pins))
+lean#InfoviewClearPins()
+edit!
+lean#OnChanged(pinned_source)
 
 var state = lean#InfoviewState()
 win_gotoid(state.source_winid)
 setline(2, '  exact True')
 lean#OnChanged(state.source_bufnr)
-assert_true(WaitFor(() => !empty(lean#lsp#DiagnosticsAt(state.source_bufnr, 1))),
+assert_true(harness.WaitFor(() => !empty(lean#lsp#DiagnosticsAt(state.source_bufnr, 1))),
   'real Lean server did not accept the incremental didChange notification')
 
 lean#InfoviewClose()
@@ -69,7 +77,7 @@ assert_true(completion_poll.selected,
 assert_equal('#check Nat.succ', getline(5), 'real Lean completion applied the wrong text edit')
 
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean')
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'lake serve did not initialize for the Lake fixture')
 assert_equal('lake', lean#LspStatus().command[0])
 assert_equal(root .. '/test/fixtures/LakeProject', lean#LspStatus().root)

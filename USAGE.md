@@ -39,12 +39,16 @@ Pins (`:LeanInfoviewAddPin`, `<LocalLeader>x`) capture the goal at a
 position so you can watch two proof states at once; `:LeanInfoviewClearPins`
 removes them. Diff pins (`:LeanInfoviewSetDiffPin`, `<LocalLeader>dx`)
 record a baseline goal and show a `-`/`+` line diff as the goal evolves;
-`:LeanInfoviewToggleAutoDiffPin` re-baselines on every step. Pins are
-snapshots of text — they do not re-elaborate as the file changes.
+`:LeanInfoviewToggleAutoDiffPin` re-baselines on every step. Live pins follow
+edits and refresh their goals as Lean processes the file. Diff pins retain
+their baseline text until you replace it.
 Each pin retains its original file; `<CR>` returns to that file even after
 the infoview follows a different buffer.
 
-`:LeanInfoviewPinTogglePause` freezes updates while you explore;
+`:LeanInfoviewPinTogglePause` freezes goal updates while you explore; pin
+positions continue tracking edits, and resuming refreshes their goals. Closing
+the infoview suspends requests until it is reopened.
+
 `:LeanGoal` and `:LeanTermGoal` show one-off popups without the split.
 
 ## Typing Lean

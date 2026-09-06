@@ -10,22 +10,10 @@ execute 'set runtimepath^=' .. fnameescape(root)
 runtime plugin/lean.vim
 
 var failed = false
-for path in [
-  'autoload/lean.vim',
-  'autoload/lean/util.vim',
-  'autoload/lean/config.vim',
-  'autoload/lean/lsp.vim',
-  'autoload/lean/infoview.vim',
-  'autoload/lean/abbreviations.vim',
-  'autoload/lean/completion.vim',
-  'autoload/lean/inlayhints.vim',
-  'autoload/lean/editor.vim',
-  'autoload/lean/health.vim',
-  'autoload/lean/loogle.vim',
-  'indent/lean.vim',
-]
+for path in sort(globpath(root, 'autoload/**/*.vim', false, true))
+    + [root .. '/indent/lean.vim']
   v:errmsg = ''
-  execute 'source ' .. fnameescape(root .. '/' .. path)
+  execute 'source ' .. fnameescape(path)
   if !empty(v:errmsg)
     echomsg $'lint: {path}: {v:errmsg}'
     failed = true

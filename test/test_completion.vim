@@ -5,6 +5,7 @@ var rpc_log = root .. '/test-completion-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
@@ -19,17 +20,6 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Completion.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 3000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def RpcMessages(method: string): list<any>
   var found: list<any> = []
@@ -47,7 +37,7 @@ def CompletionRequests(line: number = -1): list<any>
     line < 0 || get(get(get(message, 'params', {}), 'position', {}), 'line', -1) == line)
 enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'completion fake server did not initialize')
 assert_equal('lean#completion#OmniFunc', &l:omnifunc, 'omnifunc was not installed')
 assert_match('noinsert', &completeopt, 'completeopt was not applied buffer-locally')
@@ -116,11 +106,13 @@ enddef
 # 1. Manual omni completion honors a server textEdit that starts before the
 # local word (`-- α😊abc`: edit begins at the α, UTF-16 unit 3, so accepting
 # must also delete the α😊 prefix the edit covers).
+harness.Scenario(bufnr(), 'textDocument/completion', 'unicode-prefix')
 DriveInsert("2G$a\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'manual omni completion never opened the pum')
 assert_equal('-- abcγδ', getline(2), 'reaching-back textEdit was not honored')
 
 # Default manual completion must install the same resolve and cleanup hooks.
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 DriveInsert("5GA s\<C-x>\<C-o>", "\<C-n>", 'resolve')
 assert_match('resolved documentation', pum_poll.popup_text,
   'manual completion did not resolve documentation with default settings')
@@ -130,16 +122,21 @@ var manual_resolves = len(RpcMessages('completionItem/resolve'))
 # Replacement ends, filtering text, and different item ranges must all be
 # honored. The popup is requested between "abc" and "TAIL".
 append(6, repeat(['-- abcTAIL!!'], 5))
+harness.Scenario(bufnr(), 'textDocument/completion', 'replace-suffix')
 DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'filterText did not make the completion visible')
 assert_equal('-- replacement!!', getline(7), 'completion left its replacement suffix behind')
 assert_equal([7, strlen('-- replacement')], [line('.'), col('.')])
+harness.Scenario(bufnr(), 'textDocument/completion', 'insert-range')
 DriveInsert("8G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_equal('-- insertedTAIL!!', getline(8), 'InsertReplaceEdit did not use its insert range')
+harness.Scenario(bufnr(), 'textDocument/completion', 'insert-text')
 DriveInsert("10G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_equal('-- differentTAIL!!', getline(10), 'label replaced the differing insertText')
+harness.Scenario(bufnr(), 'textDocument/completion', 'mixed-ranges')
 DriveInsert("11G06li\<C-x>\<C-o>", "\<C-n>\<C-n>\<C-y>\<Esc>")
 assert_equal('replacement!!', getline(11), 'the selected item did not use its own edit range')
+harness.Scenario(bufnr(), 'textDocument/completion', 'multiline')
 DriveInsert("9G06li\<C-x>\<C-o>", "\<C-n>\<C-y>\<Esc>")
 assert_equal('-- imported', getline(1), 'completion did not apply additionalTextEdits')
 assert_equal(['-- first', 'second!!'], getline(10, 11), 'multiline completion was not inserted')
@@ -151,17 +148,30 @@ assert_equal('def one := 1', getline(1), 'one undo did not revert additional edi
 # A selected completion also commits correctly when followed by a space;
 # cancelling the popup must preserve the original word and suffix.
 setline(7, '-- abcTAIL!!')
+harness.Scenario(bufnr(), 'textDocument/completion', 'replace-suffix')
 DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n> \<Esc>")
 assert_equal('-- replacement !!', getline(7), 'typing a space did not commit the actual edit')
 setline(7, '-- abcTAIL!!')
+harness.Scenario(bufnr(), 'textDocument/completion', 'replace-suffix')
 DriveInsert("7G06li\<C-x>\<C-o>", "\<C-n>\<C-e>\<Esc>")
 assert_equal('-- abcTAIL!!', getline(7), 'cancelling completion changed the text')
 
 # Leaving Insert mode cancels a slow manually requested completion too.
 var cancel_count = len(RpcMessages('$/cancelRequest'))
-timer_start(100, (_) => feedkeys("\<Esc>", 'nt'))
+harness.Hold(bufnr(), 'textDocument/completion', 'manual-pending')
+var manual_pending = {count: len(CompletionRequests()), polls: 0}
+def LeaveAfterRequest(_timer: number)
+  if len(CompletionRequests()) > manual_pending.count || manual_pending.polls >= 300
+    feedkeys("\<Esc>", 'nt')
+    return
+  endif
+  manual_pending.polls += 1
+  timer_start(10, LeaveAfterRequest)
+enddef
+timer_start(0, LeaveAfterRequest)
 feedkeys("4GA s\<C-x>\<C-o>", 'xt!')
-sleep 450m
+harness.Release(bufnr(), 'manual-pending')
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 assert_true(len(RpcMessages('$/cancelRequest')) > cancel_count,
   'leaving Insert mode did not cancel manual completion')
 
@@ -179,6 +189,7 @@ lean#config#Reset()
 lean#completion#SetupBuffer(bufnr())
 
 # 2. Auto-popup fires on typed identifier characters.
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 DriveInsert("1GA s", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'auto-popup did not open after an identifier character')
 assert_equal('def one := 1 succ', getline(1), 'auto completion inserted the wrong text')
@@ -188,6 +199,7 @@ assert_equal(1, get(get(get(auto_requests[-1], 'params', {}), 'context', {}), 't
   'typed identifier completion did not use triggerKind Invoked')
 
 # 3. A typed dot triggers immediately with the trigger character context.
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 DriveInsert("3GA.", "\<C-n>\<C-y>\<Esc>")
 assert_true(pum_poll.fired, 'auto-popup did not open after the dot trigger')
 assert_equal('def two := 2.succ', getline(3), 'dot completion inserted the wrong text')
@@ -197,6 +209,7 @@ assert_equal(2, get(get(get(dot_requests[-1], 'params', {}), 'context', {}), 'tr
   'dot completion did not use triggerKind TriggerCharacter')
 
 # 4. Selecting an item resolves it once and fills the info popup.
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 DriveInsert("5GA s", "\<C-n>", 'resolve')
 assert_true(pum_poll.fired, 'auto-popup did not open for the resolve test')
 assert_match('resolved documentation', pum_poll.popup_text,
@@ -208,20 +221,28 @@ assert_equal('succ', get(get(resolves[-1], 'params', {}), 'label', ''),
 assert_equal('def four := 4 succ', getline(5), 'resolve test accepted the wrong item')
 
 # 5. An isIncomplete list is re-queried when typing continues.
+harness.Scenario(bufnr(), 'textDocument/completion', 'incomplete')
 DriveInsert("6GA s", 'u', 'requery')
 assert_true(pum_poll.fired, 'auto-popup did not open for the isIncomplete test')
 assert_true(pum_poll.requeried, 'an isIncomplete list was not re-queried while typing')
 
-# 6. A superseding request cancels the in-flight one (line 3 is slow).
-var cancel_state = {typed: false}
+# 6. Hold the first reply until a second request has cancelled it.
+harness.Hold(bufnr(), 'textDocument/completion', 'superseded')
+var cancel_state = {typed: false, requests: len(CompletionRequests()), polls: 0}
+var cancels_before = len(RpcMessages('$/cancelRequest'))
 def TypeSecondChar(_timer: number)
+  if len(CompletionRequests()) <= cancel_state.requests && cancel_state.polls < 300
+    cancel_state.polls += 1
+    timer_start(10, TypeSecondChar)
+    return
+  endif
   cancel_state.typed = true
   feedkeys('u', 'nt')
   timer_start(20, PollCancel)
 enddef
 var cancel_poll = {waited: 0}
 def PollCancel(_timer: number)
-  if !empty(RpcMessages('$/cancelRequest'))
+  if len(RpcMessages('$/cancelRequest')) > cancels_before
     feedkeys("\<Esc>", 'nt')
     return
   endif
@@ -232,11 +253,13 @@ def PollCancel(_timer: number)
   endif
   timer_start(20, PollCancel)
 enddef
-timer_start(250, TypeSecondChar)
+timer_start(0, TypeSecondChar)
 feedkeys("4GA s", 'xt!')
 assert_true(cancel_state.typed, 'the superseding character was never typed')
-assert_false(empty(RpcMessages('$/cancelRequest')),
-  'superseding a slow completion request did not cancel it')
+assert_true(len(RpcMessages('$/cancelRequest')) > cancels_before,
+  'superseding a held completion request did not cancel it')
+harness.Release(bufnr(), 'superseded')
+harness.Scenario(bufnr(), 'textDocument/completion', 'default')
 
 # 7. Abbreviations suppress completion entirely while active.
 var completions_before = len(CompletionRequests())
@@ -246,8 +269,7 @@ sleep 300m
 assert_equal(completions_before, len(CompletionRequests()),
   'completion requests were issued while an abbreviation was active')
 
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 
 if !empty(v:errors)
   for error in v:errors

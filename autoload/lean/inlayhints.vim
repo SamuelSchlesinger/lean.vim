@@ -2,14 +2,14 @@ vim9script
 
 import autoload 'lean/config.vim' as config
 import autoload 'lean/lsp.vim' as lsp
+import autoload 'lean/requests.vim' as requests
 import autoload 'lean/util.vim' as util
 
 # LSP inlay hints rendered as text-property virtual text. Requests cover only
 # the union of visible ranges (plus a margin): Lean elaborates hints lazily
 # and Mathlib-sized files make whole-document requests wasteful.
 
-var generations: dict<number> = {}
-var inflight: dict<list<number>> = {}
+var scopes: dict<any> = {}
 var debounce_timers: dict<number> = {}
 var pending_insert: dict<bool> = {}
 var enabled_override = -1
@@ -81,20 +81,16 @@ export def Refresh(bufnr: number)
   if has_key(debounce_timers, key)
     timer_stop(remove(debounce_timers, key))
   endif
-  var request_generation = get(generations, key, 0) + 1
-  generations[key] = request_generation
-  for request in get(inflight, key, [])
-    lsp.Cancel(bufnr, request)
-  endfor
-  inflight[key] = []
-  var version = getbufvar(bufnr, 'lean_lsp_version', 0)
-  var changedtick = getbufvar(bufnr, 'changedtick', -1)
+  if !has_key(scopes, key)
+    scopes[key] = requests.NewScope()
+  endif
+  var context = requests.Begin(scopes[key], bufnr)
   var line_count = len(getbufline(bufnr, 1, '$'))
   var batch: dict<any> = {remaining: len(spans), hints: [], error: v:null}
   for span in spans
     # Vim closures share the for-loop variable; bind this request's range.
     var Reply = function(OnRangeHints,
-      [bufnr, request_generation, version, changedtick, batch, span])
+      [bufnr, batch, span])
     var end_position: dict<number>
     if span[1] < line_count
       end_position = {line: span[1], character: 0}
@@ -103,19 +99,14 @@ export def Refresh(bufnr: number)
       end_position = {line: line_count - 1,
         character: max([0, utf16idx(text, strlen(text))])}
     endif
-    var request = lsp.Request(bufnr, 'textDocument/inlayHint', {
+    requests.Send(context, 'textDocument/inlayHint', {
       textDocument: {uri: util.UriFromBuf(bufnr)},
       range: {start: {line: span[0] - 1, character: 0}, end: end_position},
     }, Reply)
-    add(inflight[key], request)
   endfor
 enddef
 
-def OnRangeHints(bufnr: number, generation: number, version: number, changedtick: number,
-    batch: dict<any>, span: list<number>, result: any, error: any)
-  if get(generations, string(bufnr), -1) != generation
-    return
-  endif
+def OnRangeHints(bufnr: number, batch: dict<any>, span: list<number>, result: any, error: any)
   if type(error) == v:t_dict
     batch.error = error
   elseif type(result) == v:t_list
@@ -129,7 +120,7 @@ def OnRangeHints(bufnr: number, generation: number, version: number, changedtick
   endif
   batch.remaining -= 1
   if batch.remaining == 0
-    OnHints(bufnr, generation, version, changedtick, batch.hints, batch.error)
+    OnHints(bufnr, batch.hints, batch.error)
   endif
 enddef
 
@@ -149,19 +140,10 @@ def HintLabel(label: any): string
   return ''
 enddef
 
-def OnHints(bufnr: number, request_generation: number, version: number, changedtick: number,
-    result: any, error: any)
+def OnHints(bufnr: number, result: any, error: any)
   var key = string(bufnr)
-  if get(generations, key, -1) != request_generation
-    return
-  endif
-  inflight[key] = []
   if type(error) == v:t_dict
     # Keep what is rendered; the next sync or scroll refreshes.
-    return
-  endif
-  if !bufloaded(bufnr) || getbufvar(bufnr, 'lean_lsp_version', -1) != version
-      || getbufvar(bufnr, 'changedtick', -1) != changedtick
     return
   endif
   if bufnr == bufnr() && mode(1) =~# '^i'
@@ -284,14 +266,9 @@ export def Clear(bufnr: number)
   if has_key(pending_insert, key)
     remove(pending_insert, key)
   endif
-  for request in get(inflight, key, [])
-    lsp.Cancel(bufnr, request)
-  endfor
-  if has_key(inflight, key)
-    remove(inflight, key)
+  if has_key(scopes, key)
+    requests.Cancel(remove(scopes, key))
   endif
-  # Invalidate any reply still in flight.
-  generations[key] = get(generations, key, 0) + 1
   ClearProps(bufnr)
 enddef
 

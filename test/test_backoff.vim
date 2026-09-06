@@ -2,6 +2,7 @@ vim9script
 
 var root = fnamemodify(expand('<sfile>'), ':p:h:h')
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   lsp: {
@@ -13,17 +14,6 @@ g:lean_config = {
 runtime plugin/lean.vim
 filetype plugin indent on
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 # A missing binary fails asynchronously on Unix: job_start() succeeds and the
 # exec failure arrives through the exit callback. Each attempt reports one
@@ -34,9 +24,9 @@ def FailureCount(): number
 enddef
 
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
-assert_true(WaitFor(() => FailureCount() == 1),
+assert_true(harness.WaitFor(() => FailureCount() == 1),
   'opening the buffer did not report the start failure')
-assert_true(WaitFor(() => !get(lean#LspStatus(), 'running', true)),
+assert_true(harness.WaitFor(() => !get(lean#LspStatus(), 'running', true)),
   'server reported running after a failed start')
 
 # Re-attaching (what every WinEnter does) must not spawn or notify again
@@ -49,9 +39,9 @@ assert_equal(1, FailureCount(), 'window re-entry retried a failed server inside 
 
 # A manual restart clears the backoff and retries immediately.
 lean#RestartServer()
-assert_true(WaitFor(() => FailureCount() >= 2),
+assert_true(harness.WaitFor(() => FailureCount() >= 2),
   ':LeanRestartServer did not retry inside the backoff')
-assert_true(WaitFor(() => !get(lean#LspStatus(), 'running', true)),
+assert_true(harness.WaitFor(() => !get(lean#LspStatus(), 'running', true)),
   'server reported running after the manual retry failed')
 var after_restart = FailureCount()
 

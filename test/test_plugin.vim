@@ -5,6 +5,7 @@ var rpc_log = root .. '/test-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   mappings: true,
   abbreviations: {extra: {'λx': 'custom'}},
@@ -21,17 +22,6 @@ filetype plugin indent on
 syntax enable
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def ApplyIncremental(old_text: string, change: dict<any>): string
   var start = lean#util#TextOffset(old_text, change.range.start)
@@ -92,7 +82,7 @@ for start_character in range(character_count)
   endfor
 endfor
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)), 'LSP did not initialize')
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)), 'LSP did not initialize')
 assert_equal('lean', &filetype)
 assert_equal('-- %s', &commentstring)
 assert_equal('g:LeanVim9Indent(v:lnum)', &indentexpr)
@@ -124,14 +114,14 @@ assert_equal('/opt/lean/lean/library',
   lean#lsp#ProjectRoot('/opt/lean/lean/library/Init/Prelude.lean'),
   'Lean source library root was not detected')
 
-assert_true(WaitFor(() => !empty(sign_getplaced(bufnr(), {group: 'lean-diagnostics'})[0].signs)),
+assert_true(harness.WaitFor(() => !empty(sign_getplaced(bufnr(), {group: 'lean-diagnostics'})[0].signs)),
   'diagnostic sign was not placed')
 assert_equal('test warning', lean#lsp#DiagnosticsAt(bufnr(), 1)[0].message)
 assert_equal(1, len(lean#lsp#DiagnosticsAt(bufnr(), 1)))
 assert_true(index(mapnew(sign_getplaced(bufnr(), {group: 'lean-diagnostics'})[0].signs,
   (_, sign) => sign.name), 'LeanGoalUnsolved') >= 0)
 assert_true(lean#lsp#ProgressAt(bufnr(), 2))
-assert_true(WaitFor(() => index(mapnew(prop_list(1, {bufnr: bufnr()}),
+assert_true(harness.WaitFor(() => index(mapnew(prop_list(1, {bufnr: bufnr()}),
   (_, property) => property.type), 'LeanSemantic_keyword') >= 0),
   'semantic token property was not placed')
 # variable and property tokens are unstyled by default: their prop types are
@@ -141,7 +131,7 @@ assert_true(empty(prop_type_get('LeanSemantic_variable')),
 assert_true(empty(prop_type_get('LeanSemantic_property')),
   'property semantic tokens were rendered by default')
 
-assert_true(WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
+assert_true(harness.WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
   'auto-opened infoview goal did not render: ' .. string(lean#InfoviewState()))
 var state = lean#InfoviewState()
 assert_equal(['Nat'], state.term_goal)
@@ -150,7 +140,7 @@ assert_equal(['Nat'], state.term_goal)
 # BufWinEnter must still create that tab's independent auto-opened infoview.
 var original_infoview_bufnr = state.bufnr
 tab split
-assert_true(WaitFor(() => !empty(lean#InfoviewState())
+assert_true(harness.WaitFor(() => !empty(lean#InfoviewState())
   && lean#InfoviewState().bufnr != original_infoview_bufnr),
   'auto-open did not create an infoview for an existing buffer in a new tab')
 var second_tab_infoview_bufnr = lean#InfoviewState().bufnr
@@ -165,12 +155,13 @@ state = lean#InfoviewState()
 lean#InfoviewClose()
 assert_true(empty(win_findbuf(state.bufnr)), 'infoview window did not close')
 lean#InfoviewOpen()
-assert_true(WaitFor(() => !empty(win_findbuf(state.bufnr))), 'infoview window did not reopen')
+assert_true(harness.WaitFor(() => !empty(win_findbuf(state.bufnr))), 'infoview window did not reopen')
 state = lean#InfoviewState()
 
 var source = state.source_bufnr
 win_gotoid(state.source_winid)
 sleep 20m
+harness.Hold(source, '$/lean/plainGoal', 'throttled-goal')
 var sequence = lean#InfoviewState().sequence
 noautocmd call cursor(4, 1)
 lean#OnCursorMoved(source)
@@ -180,8 +171,10 @@ noautocmd call cursor(2, 1)
 lean#OnCursorMoved(source)
 assert_equal(sequence + 1, lean#InfoviewState().sequence,
   'the infoview throttle did not suppress an update during its cooldown')
-assert_true(WaitFor(() => lean#InfoviewState().sequence == sequence + 2),
+assert_true(harness.WaitFor(() => lean#InfoviewState().sequence == sequence + 2),
   'the infoview throttle did not flush its trailing update')
+harness.Release(source, 'throttled-goal')
+harness.Scenario(source, '$/lean/plainGoal', 'default')
 
 var version_before_change = getbufvar(source, 'lean_lsp_version', 0)
 setbufline(source, 2, '  exact 43')
@@ -194,7 +187,7 @@ setbufline(source, 2, '  exact 45')
 lean#OnChanged(source)
 assert_equal(version_before_change + 1, getbufvar(source, 'lean_lsp_version', 0),
   'a document edit burst was not debounced')
-assert_true(WaitFor(() => getbufvar(source, 'lean_lsp_version', 0)
+assert_true(harness.WaitFor(() => getbufvar(source, 'lean_lsp_version', 0)
   == version_before_change + 2), 'the trailing document edit was not flushed')
 sleep 30m
 assert_true(indexof(lean#lsp#DiagnosticsAt(source, 0), (_, diagnostic) =>
@@ -235,12 +228,12 @@ assert_equal('  exact 42', getbufline(source, 2)[0], 'a stale workspace edit cha
 # Restarting replaces the server object before the old process necessarily
 # reports its exit. The old callback must not mark the new server as dead.
 lean#RestartServer()
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'restarted LSP did not initialize')
 sleep 100m
 assert_true(get(lean#LspStatus(), 'running', false),
   'the old server exit callback stopped the replacement server')
-assert_true(WaitFor(() => !empty(sign_getplaced(source, {group: 'lean-diagnostics'})[0].signs)),
+assert_true(harness.WaitFor(() => !empty(sign_getplaced(source, {group: 'lean-diagnostics'})[0].signs)),
   'diagnostics did not return after restart')
 
 setbufline(source, 5, '')
@@ -269,7 +262,7 @@ var renamed_uri = lean#util#UriFromBuf(source)
 assert_notequal(original_uri, renamed_uri)
 assert_equal(renamed_uri, getbufvar(source, 'lean_lsp_uri', ''),
   'BufFilePost did not transfer LSP ownership to the new URI')
-assert_true(WaitFor(() => index(mapnew(prop_list(1, {bufnr: source}),
+assert_true(harness.WaitFor(() => index(mapnew(prop_list(1, {bufnr: source}),
   (_, property) => property.type), 'LeanSemantic_keyword') >= 0),
   'semantic tokens did not return for the renamed document')
 
@@ -289,8 +282,7 @@ assert_true(index(mapnew(prop_list(1, {bufnr: source}),
 assert_true(empty(lean#lsp#DiagnosticsAt(source, 1)), 'diagnostic cache survived detach')
 assert_false(lean#lsp#ProgressAt(source, 2), 'progress cache survived detach')
 
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 
 var messages = mapnew(filereadable(rpc_log) ? readfile(rpc_log) : [], (_, line) => json_decode(line))
 assert_true(indexof(messages, (_, message) => get(message, 'method', '') ==# 'initialize') >= 0)

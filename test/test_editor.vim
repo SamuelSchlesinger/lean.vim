@@ -5,6 +5,7 @@ var rpc_log = root .. '/test-editor-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false},
   semantic_highlighting: {enable: false},
@@ -20,17 +21,6 @@ filetype plugin indent on
 set hidden
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Editor.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 def RpcHas(method: string, command: string = ''): bool
   for encoded in filereadable(rpc_log) ? readfile(rpc_log) : []
@@ -44,13 +34,13 @@ def RpcHas(method: string, command: string = ''): bool
   return false
 enddef
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'editor fake server did not initialize')
 
 # LSP columns are UTF-16 code units, while quickfix columns are byte based.
 cursor(1, 1)
 lean#References()
-assert_true(WaitFor(() => !empty(getqflist())), 'references did not populate quickfix')
+assert_true(harness.WaitFor(() => !empty(getqflist())), 'references did not populate quickfix')
 assert_equal(10, getqflist()[0].col, 'reference UTF-16 column was used as a byte column')
 assert_equal('-- α😊target', getqflist()[0].text, 'reference quickfix item omitted source context')
 cclose
@@ -58,6 +48,9 @@ cclose
 # Delayed navigation, hover, and outline replies belong to the requesting
 # window. They must not modify a window visited while Lean was responding.
 var navigation_source = bufnr()
+for method in ['textDocument/definition', 'textDocument/hover', 'textDocument/documentSymbol']
+  harness.Hold(bufnr(), method, method)
+endfor
 lean#Definition()
 lean#Hover()
 lean#Outline()
@@ -66,7 +59,10 @@ cursor(3, 2)
 var destination = win_getid()
 var destination_cursor = getcurpos()[1 : 2]
 var destination_list = getloclist(0)
-sleep 400m
+for method in ['textDocument/definition', 'textDocument/hover', 'textDocument/documentSymbol']
+  harness.Release(bufnr(), method)
+  harness.Scenario(bufnr(), method, 'default')
+endfor
 assert_equal(destination, win_getid(), 'a delayed response changed the active window')
 assert_equal('Basic.lean', expand('%:t'), 'a delayed definition replaced the active buffer')
 assert_equal(destination_cursor, getcurpos()[1 : 2], 'a delayed definition moved the active cursor')
@@ -148,26 +144,30 @@ assert_false(&endofline, 'whole-document edit did not remove the final newline')
 
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/Editor.lean')
 
+harness.Scenario(bufnr(), '$/lean/plainGoal', 'two-goals')
 # Multiple goals get focused sorries and leave the cursor in the first one.
 cursor(2, strlen(getline(2)))
 lean#SorryFill()
-assert_true(WaitFor(() => getline(3) ==# '  · sorry'), 'multiple-goal sorries were not inserted')
+assert_true(harness.WaitFor(() => getline(3) ==# '  · sorry'), 'multiple-goal sorries were not inserted')
 assert_equal(['  · sorry', '  · sorry'], getline(3, 4))
 assert_equal([3, 6], [line('.'), col('.')], 'cursor was not placed in the first focused sorry')
 
+harness.Scenario(bufnr(), '$/lean/plainGoal', 'default')
 # A sorry inserted from within a focused branch is indented under the branch.
 edit!
 cursor(3, strlen(getline(3)))
 lean#SorryFill()
-assert_true(WaitFor(() => getline(4) ==# '    sorry'), 'focused-branch sorry was not indented')
+assert_true(harness.WaitFor(() => getline(4) ==# '    sorry'), 'focused-branch sorry was not indented')
 assert_equal([4, 5], [line('.'), col('.')], 'cursor was not placed in the inserted sorry')
 
 # Async replies must not edit a buffer which changed after the request.
 edit!
 cursor(4, strlen(getline(4)))
+harness.Hold(bufnr(), '$/lean/plainGoal', 'stale-sorry')
 lean#SorryFill()
 setline(4, '  exact changed')
-sleep 150m
+harness.Release(bufnr(), 'stale-sorry')
+harness.Scenario(bufnr(), '$/lean/plainGoal', 'default')
 assert_equal(4, line('$'), 'stale LeanSorryFill response inserted text')
 assert_equal('  exact changed', getline(4))
 
@@ -175,10 +175,13 @@ assert_equal('  exact changed', getline(4))
 # is current by the time it arrives.
 edit!
 var editor_bufnr = bufnr()
+harness.Hold(bufnr(), '$/lean/plainGoal', 'hidden-sorry')
 cursor(4, strlen(getline(4)))
 lean#SorryFill()
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
-assert_true(WaitFor(() => len(getbufline(editor_bufnr, 1, '$')) == 5),
+harness.Release(bufnr(), 'hidden-sorry')
+harness.Scenario(bufnr(), '$/lean/plainGoal', 'default')
+assert_true(harness.WaitFor(() => len(getbufline(editor_bufnr, 1, '$')) == 5),
   'LeanSorryFill did not update its hidden target buffer')
 assert_equal('  sorry', getbufline(editor_bufnr, 5)[0],
   'LeanSorryFill used the current buffer indentation')
@@ -190,27 +193,29 @@ edit!
 # make a cleared pin reappear.
 edit!
 cursor(4, strlen(getline(4)))
+harness.Hold(bufnr(), '$/lean/plainGoal', 'cleared-pin')
 lean#InfoviewAddPin()
 lean#InfoviewClearPins()
-sleep 300m
+harness.Release(bufnr(), 'cleared-pin')
+harness.Scenario(bufnr(), '$/lean/plainGoal', 'default')
 assert_true(empty(get(lean#InfoviewState(), 'pins', [])), 'cleared pin reappeared after a late reply')
 
 # Data-only code actions must be resolved before their resulting command is
 # executed.
 lean#editor#ApplyCodeAction(bufnr(), {title: 'resolve me', data: {id: 1}})
-assert_true(WaitFor(() => RpcHas('codeAction/resolve')),
+assert_true(harness.WaitFor(() => RpcHas('codeAction/resolve')),
   'data-only code action was not resolved')
-assert_true(WaitFor(() => RpcHas('workspace/executeCommand', 'fake.resolvedAction')),
+assert_true(harness.WaitFor(() => RpcHas('workspace/executeCommand', 'fake.resolvedAction')),
   'resolved code-action command was not executed')
 
 # <CR> in the infoview jumps the source window to the rendered entry.
 edit!
 cursor(2, 3)
 lean#InfoviewOpen()
-assert_true(WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
+assert_true(harness.WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
   'infoview goal did not render for the jump test')
 lean#InfoviewAddPin()
-assert_true(WaitFor(() => len(get(lean#InfoviewState(), 'pins', [])) == 1),
+assert_true(harness.WaitFor(() => len(get(lean#InfoviewState(), 'pins', [])) == 1),
   'pin was not added for the jump test')
 var jump_view = lean#InfoviewState()
 var pin_lnum = indexof(getbufline(jump_view.bufnr, 1, '$'),
@@ -239,7 +244,7 @@ lean#InfoviewClose()
 
 # :LeanDiagnosticsList collects real diagnostics and skips decoration-only
 # entries (silent goals, goal markers).
-assert_true(WaitFor(() => !empty(lean#lsp#Diagnostics(lean#util#UriFromBuf(bufnr())))),
+assert_true(harness.WaitFor(() => !empty(lean#lsp#Diagnostics(lean#util#UriFromBuf(bufnr())))),
   'diagnostics were not republished for the loclist test')
 lean#DiagnosticsList()
 var loclist = getloclist(0)
@@ -251,7 +256,7 @@ lclose
 
 # The document outline flattens hierarchical symbols with depth indenting.
 lean#Outline()
-assert_true(WaitFor(() => get(getloclist(0, {title: 1}), 'title', '') ==# 'Lean outline'),
+assert_true(harness.WaitFor(() => get(getloclist(0, {title: 1}), 'title', '') ==# 'Lean outline'),
   'outline did not populate the location list')
 var outline = getloclist(0)
 assert_equal(2, len(outline), 'outline item count')
@@ -263,7 +268,7 @@ lclose
 
 # Workspace symbol search fills the quickfix list with kind labels.
 lean#WorkspaceSymbols('succ')
-assert_true(WaitFor(() => get(getqflist({title: 1}), 'title', '') =~# 'workspace symbols'),
+assert_true(harness.WaitFor(() => get(getqflist({title: 1}), 'title', '') =~# 'workspace symbols'),
   'workspace symbols did not populate quickfix')
 var symbols = getqflist()
 assert_equal(1, len(symbols), 'workspace symbol count')
@@ -308,7 +313,7 @@ timer_start(10, (_) => feedkeys("Nat.succ\<CR>", 'nt'))
 nnoremap <buffer> ,l <Cmd>LeanLooglePopup<CR>
 feedkeys(',l', 'xt')
 nunmap <buffer> ,l
-assert_true(WaitFor(() => getline(1) ==# 'Loogle: Nat.succ'),
+assert_true(harness.WaitFor(() => getline(1) ==# 'Loogle: Nat.succ'),
   ':LeanLooglePopup did not submit the prompted query')
 assert_match('Nat.succ : Nat → Nat', getline(3),
   ':LeanLooglePopup did not render the search result')
@@ -332,8 +337,7 @@ lean#Health()
 assert_equal(health_buffer, bufnr(), 'repeating LeanHealth did not refresh the existing report')
 close
 
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 delete(rpc_log)
 
 if !empty(v:errors)

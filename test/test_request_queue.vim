@@ -5,12 +5,13 @@ var rpc_log = root .. '/test-request-queue-rpc.log'
 delete(rpc_log)
 
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false, update_cooldown: 0},
   semantic_highlighting: {enable: false},
   lsp: {
     command: [
-      'python3', root .. '/test/support/fake_lean_server.py', rpc_log, '2', '1.0', '0',
+      'python3', root .. '/test/support/fake_lean_server.py', rpc_log, '2', 'hold-initialize', 'none',
     ],
     stderr: false,
   },
@@ -20,17 +21,6 @@ runtime plugin/lean.vim
 filetype plugin indent on
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
 
-def WaitFor(Predicate: func(): any, timeout_ms: number = 2000): bool
-  var elapsed = 0
-  while elapsed < timeout_ms
-    if Predicate()
-      return true
-    endif
-    sleep 10m
-    elapsed += 10
-  endwhile
-  return Predicate()
-enddef
 
 # These updates all happen while initialize is still in flight. Superseded
 # requests should be removed from the local queue, not flushed in a burst when
@@ -55,12 +45,12 @@ lean#lsp#Attach(queued_buffer)
 lean#lsp#Request(queued_buffer, 'test/detached', {}, (_result, _error) => 0)
 lean#lsp#Detach(queued_buffer)
 
-assert_true(WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+harness.Release(bufnr(), 'initialize')
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'delayed fake server did not initialize')
-assert_true(WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
+assert_true(harness.WaitFor(() => !empty(get(lean#InfoviewState(), 'goal', []))),
   'latest queued infoview request did not complete')
-lean#Stop()
-sleep 50m
+harness.Stop(rpc_log)
 
 var messages = mapnew(filereadable(rpc_log) ? readfile(rpc_log) : [],
   (_, line) => json_decode(line))

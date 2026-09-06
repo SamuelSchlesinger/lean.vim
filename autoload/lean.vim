@@ -9,6 +9,9 @@ import autoload 'lean/infoview.vim' as infoview
 import autoload 'lean/inlayhints.vim' as inlayhints
 import autoload 'lean/loogle.vim' as loogle
 import autoload 'lean/lsp.vim' as lsp
+import autoload 'lean/semantic.vim' as semantic
+import autoload 'lean/pins.vim' as pins
+import autoload 'lean/requests.vim' as requests
 import autoload 'lean/util.vim' as util
 
 var initialized = false
@@ -59,9 +62,25 @@ export def Init()
     return
   endif
   initialized = true
+  pins.SetChangedHandler(infoview.RefreshPins)
+  lsp.SetDocumentHandlers({synced: OnDocumentSynced, cleared: OnDocumentCleared,
+    semantic: semantic.OnBufferSynced, inlay: inlayhints.OnBufferSynced})
   if !has('vim9script') || !has('job') || !has('channel') || !has('popupwin') || !has('textprop')
     util.Notify('requires Vim 9 with +job, +channel, +popupwin, and +textprop', 'ErrorMsg')
   endif
+enddef
+
+def OnDocumentSynced(bufnr: number)
+  infoview.RefreshPins(bufnr)
+  semantic.OnBufferSynced(bufnr)
+  inlayhints.OnBufferSynced(bufnr)
+enddef
+
+def OnDocumentCleared(bufnr: number)
+  requests.CancelBuffer(bufnr)
+  infoview.InvalidatePins(bufnr)
+  semantic.Clear(bufnr)
+  inlayhints.Clear(bufnr)
 enddef
 
 def DefinePlugMappings()
@@ -182,6 +201,7 @@ export def OnSaved(bufnr: number)
 enddef
 
 export def OnFileRenamed(bufnr: number)
+  pins.Rename(bufnr)
   lsp.Attach(bufnr)
   infoview.ScheduleUpdate(bufnr)
 enddef
@@ -204,6 +224,7 @@ export def InlayHintsToggle()
 enddef
 
 export def OnUnload(bufnr: number)
+  pins.Unload(bufnr)
   lsp.Detach(bufnr)
   # BufUnload fires before bufloaded() changes; refresh after it completes.
   timer_start(0, (_) => infoview.RefreshServerState())

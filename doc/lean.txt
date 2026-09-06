@@ -191,8 +191,12 @@ Infoview:~
 
 Inside the infoview, <CR> jumps the source window to the entry under the
 cursor: the position header, a pin, or a diagnostic.
-Pins are snapshots retaining their original file and position; they do not
-re-elaborate or move as the file is edited.
+Live pins retain their source file, follow edits, and request fresh goals at
+that position. Pausing freezes the displayed goals while anchors continue
+moving; resuming refreshes them. Closing the infoview suspends its requests.
+If a pinned position is deleted, the anchor moves to the end of the replacement.
+An unloaded source is marked unavailable; reloading it restores the anchor.
+Diff pins remain text baselines until replaced.
 
 Server and editor:~
 
