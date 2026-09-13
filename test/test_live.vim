@@ -5,7 +5,7 @@ execute 'set runtimepath^=' .. fnameescape(root)
 import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false, update_delay: 20},
-  lsp: {stderr: false},
+  lsp: {stderr: false, change_delay: 500},
 }
 
 runtime plugin/lean.vim
@@ -76,6 +76,32 @@ assert_true(completion_poll.selected,
   'real Lean completion did not offer Nat.succ: ' .. string(completion_poll.labels))
 assert_equal('#check Nat.succ', getline(5), 'real Lean completion applied the wrong text edit')
 
+execute 'edit! ' .. fnameescape(root .. '/test/fixtures/TermGoal.lean')
+cursor(3, strlen(getline(3)))
+lean#InfoviewOpen()
+assert_true(harness.WaitFor(() => index(lean#InfoviewState().term_goal,
+  '⊢ R v₀ v₁ → R v₁ v₂ → R v₀ v₂') >= 0),
+  'lambda proof did not show the expected type after Unicode binders')
+
+# The cursor is at the final sorry, as in graph-algos/Graph.lean. The second
+# edit lands inside the document debounce but outside the infoview cooldown.
+# Requests must see the new text, and must settle without another cursor move.
+setline(3, '  λ v₀ v₁ v₂ h₀₁ ↦ sorry')
+cursor(3, strlen(getline(3)))
+lean#OnChanged(bufnr())
+assert_true(harness.WaitFor(() => index(lean#InfoviewState().term_goal,
+  '⊢ R v₁ v₂ → R v₀ v₂') >= 0), 'first lambda edit did not update the expected type')
+sleep 30m
+setline(3, '  λ v₀ v₁ v₂ h₀₁ h₁₂ ↦ sorry')
+cursor(3, strlen(getline(3)))
+lean#OnChanged(bufnr())
+assert_true(harness.WaitFor(() => index(lean#InfoviewState().term_goal,
+  '⊢ R v₀ v₂') >= 0),
+  'expected type stayed stale after a debounced edit: ' .. string(lean#InfoviewState()))
+assert_true(index(lean#InfoviewState().term_goal, 'h₁₂ : R v₁ v₂') >= 0,
+  'expected type omitted the newly introduced hypothesis')
+
+lean#InfoviewClose()
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean')
 assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
   'lake serve did not initialize for the Lake fixture')

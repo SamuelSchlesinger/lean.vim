@@ -153,7 +153,7 @@ export def Attach(bufnr: number = bufnr())
   var group = $'lean_vim_buffer_{bufnr}'
   execute $'augroup {group}'
   autocmd!
-  execute $'autocmd TextChanged,TextChangedI <buffer={bufnr}> call lean#OnChanged({bufnr})'
+  execute $'autocmd TextChanged,TextChangedI,TextChangedP <buffer={bufnr}> call lean#OnChanged({bufnr})'
   execute $'autocmd BufWritePost <buffer={bufnr}> call lean#OnSaved({bufnr})'
   execute $'autocmd CursorMoved,CursorMovedI <buffer={bufnr}> call lean#OnCursorMoved({bufnr})'
   execute $'autocmd InsertLeave <buffer={bufnr}> call lean#OnInsertLeaveBuffer({bufnr})'
@@ -249,8 +249,8 @@ export def OnTabClosed()
 enddef
 
 export def OnServerUpdate()
-  # Diagnostics and progress already arrived in local caches. Re-render those
-  # fields without issuing redundant goal and term-goal requests.
+  # Refresh cached diagnostics and request fresh goals when processing at
+  # the followed position finishes, including views in other tabs.
   infoview.RefreshServerState()
 enddef
 

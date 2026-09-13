@@ -463,8 +463,7 @@ def TimerUpdate(key: string)
   endif
 enddef
 
-export def ScheduleUpdate(bufnr: number = bufnr())
-  var key = ViewKey()
+def ScheduleViewUpdate(key: string, bufnr: number)
   if !has_key(views, key) || views[key].source_bufnr != bufnr
     return
   endif
@@ -487,6 +486,10 @@ export def ScheduleUpdate(bufnr: number = bufnr())
   # Further events restart the cooldown. The most recent suppressed update is
   # flushed after movement stops, so rapid cursor motion does not flood Lean.
   view.timer = timer_start(cooldown, (_) => TimerUpdate(key))
+enddef
+
+export def ScheduleUpdate(bufnr: number = bufnr())
+  ScheduleViewUpdate(ViewKey(), bufnr)
 enddef
 
 def OnPopupGoal(title: string, result: any, error: any)
@@ -537,7 +540,10 @@ export def ShowLineDiagnostics(bufnr: number = bufnr())
 enddef
 
 export def RefreshServerState()
-  for view in values(views)
+  for [key, view] in items(views)
+    if !IsVisibleAnywhere(view)
+      continue
+    endif
     if !bufloaded(view.source_bufnr)
       Render(view)
       continue
@@ -545,9 +551,18 @@ export def RefreshServerState()
     if view.paused
       continue
     endif
+    var was_processing = view.processing
     view.processing = lsp.ProgressAt(view.source_bufnr, view.position.line)
     view.diagnostics = lsp.DiagnosticsAt(view.source_bufnr, view.position.line)
-    Render(view)
+    if was_processing && !view.processing
+      # Match lean.nvim's refresh when elaboration finishes at a pin. A
+      # previous response can be empty or refer to an earlier snapshot;
+      # merely removing "Processing file..." leaves it stale indefinitely.
+      # Use the owning view's key so a background tab keeps its own cursor.
+      ScheduleViewUpdate(key, view.source_bufnr)
+    else
+      Render(view)
+    endif
   endfor
 enddef
 

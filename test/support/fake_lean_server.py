@@ -380,6 +380,10 @@ def handle_request(message: dict[str, Any]) -> None:
         response(message, [])
     elif method in {"shutdown", "workspace/executeCommand"}:
         response(message, None)
+    elif method == "test/notify":
+        # Let lifecycle tests deliver notifications at precise editor states.
+        send({"jsonrpc": "2.0", **message["params"]})
+        response(message, None)
     else:
         send(
             {

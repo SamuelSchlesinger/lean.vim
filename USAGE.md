@@ -29,6 +29,11 @@ The infoview is a plain-text split that follows your cursor:
 - diagnostics at the cursor line appear below the goals,
 - `Expected type:` shows the term-mode goal when there is one.
 
+For a term proof such as `λ v₀ v₁ v₂ ↦ sorry`, put the cursor on `sorry`
+to see its local hypotheses and remaining goal under `Expected type:`.
+Goals follow unsaved edits, including edits made with completion open, and
+refresh automatically when Lean finishes processing.
+
 Inside the infoview window:
 
 - `<CR>` jumps the source window to the entry under the cursor — the

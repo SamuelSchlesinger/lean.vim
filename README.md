@@ -244,9 +244,10 @@ abbreviation interplay), inlay hints, infoview jumping, document and
 workspace symbols, UTF-16 incremental changes, restart races, workspace-edit
 preflight, live pin tracking, paused pins, stale-edit rejection, crash recovery
 across buffers, tab and ftplugin lifecycle, indentation, and Unicode
-abbreviation insertion. The live test checks goal retrieval, live pin movement
-and goal refresh, completion acceptance, diagnostic updates, Lake startup, and
-search paths against real Lean processes.
+abbreviation insertion. The live test checks tactic and term goals (including
+Unicode lambda proofs and edits during document debouncing), live pin movement
+and goal refresh, completion acceptance, diagnostic updates, Lake startup,
+and search paths against real Lean processes.
 
 ## License
 
