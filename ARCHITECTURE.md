@@ -59,6 +59,11 @@ the complete expected preview before applying the chosen item's actual edits.
 The numeric completion generation identifies popup items; it is not a second
 transport request registry.
 
+Applying LSP text edits or restoring a failed workspace edit replaces only
+the changed line span. The common prefix and suffix remain untouched, keeping
+their text properties; Vim shifts suffix properties when lines are inserted
+or deleted. This also applies to completion edits and hidden buffers.
+
 Workspace-edit-producing requests capture all open project documents. Their
 replies are rejected if any captured document changes lifetime or revision.
 The edit transaction also checks versioned targets against synchronized text,

@@ -278,13 +278,33 @@ def SetBufferText(bufnr: number, text: string): bool
   if empty(lines)
     lines = ['']
   endif
-  var old_count = len(getbufline(bufnr, 1, '$'))
-  if setbufline(bufnr, 1, lines) != 0
+  var old_lines = getbufline(bufnr, 1, '$')
+  var first = 0
+  var old_end = len(old_lines)
+  var new_end = len(lines)
+  while first < old_end && first < new_end && old_lines[first] ==# lines[first]
+    first += 1
+  endwhile
+  while old_end > first && new_end > first
+      && old_lines[old_end - 1] ==# lines[new_end - 1]
+    old_end -= 1
+    new_end -= 1
+  endwhile
+  # setbufline() removes text properties even from identical lines. Leave
+  # the common prefix and suffix alone; Vim moves suffix properties when
+  # lines are inserted or deleted within the changed span.
+  var replaced = min([old_end, new_end]) - first
+  if replaced > 0 && setbufline(bufnr, first + 1, lines[first : first + replaced - 1]) != 0
     return false
   endif
-  if old_count > len(lines)
-      && deletebufline(bufnr, len(lines) + 1, old_count) != 0
-    return false
+  if new_end > old_end
+    if appendbufline(bufnr, first + replaced, lines[first + replaced : new_end - 1]) != 0
+      return false
+    endif
+  elseif old_end > new_end
+    if deletebufline(bufnr, first + replaced + 1, old_end) != 0
+      return false
+    endif
   endif
   setbufvar(bufnr, '&endofline', has_endofline)
   return !!getbufvar(bufnr, '&endofline') == has_endofline
