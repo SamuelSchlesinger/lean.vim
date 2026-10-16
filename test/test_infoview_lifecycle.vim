@@ -2,6 +2,7 @@ vim9script
 
 var root = fnamemodify(expand('<sfile>'), ':p:h:h')
 execute 'set runtimepath^=' .. fnameescape(root)
+import './support/harness.vim' as harness
 g:lean_config = {
   infoview: {autoopen: false, update_cooldown: 20},
   lsp: {enable: false},
@@ -76,8 +77,13 @@ lean#OnCursorMoved(first.source_bufnr)
 lean#OnCursorMoved(first.source_bufnr)
 assert_equal(first_sequence + 1, lean#InfoviewState().sequence,
   'first infoview update was not on the leading edge')
+var trailing_timer = lean#InfoviewState().timer
+assert_true(trailing_timer >= 0, 'trailing infoview update had no timer')
 tabnext
-sleep 30m
+# Timer delivery may be delayed on a busy runner. Wait for this timer while
+# the other tab remains active, preserving the ownership regression check.
+assert_true(harness.WaitFor(() => empty(timer_info(trailing_timer))),
+  'trailing infoview timer did not finish')
 tabfirst
 assert_equal(first_sequence + 2, lean#InfoviewState().sequence,
   'trailing infoview update was lost or applied to the wrong tab')
