@@ -26,6 +26,15 @@ or implementation and are also distributed under the MIT license:
   ftplugin/lean.vim
   indent/lean.vim
 
+The October 2026 update also adapts lean.nvim's infoview folding and
+sign-column defaults from commits:
+
+  718540c8081bc6c8d9485d8c407b40e6c5c01468
+  d90c91bf150652e3710c8e00ab4d4a316f8593b8
+
+These affect ftplugin/leaninfo.vim, autoload/lean/infoview.vim, and
+ftplugin/lean.vim and are distributed under the same MIT license.
+
 The wider plugin follows lean.nvim's public commands, mappings, feature
 organization, and editor behavior. See ACKNOWLEDGEMENTS.md for fuller credit.
 
@@ -40,15 +49,17 @@ Lean Unicode abbreviations (Apache-2.0)
 data/lean/abbreviations.json is copied byte-for-byte from
 leanprover/vscode-lean4's lean4-unicode-input/src/abbreviations.json. It is
 licensed under Apache-2.0, not MIT. This repository obtained it through the
-copy synchronized into lean.nvim at the pinned revision above.
+copy synchronized into lean.nvim at commit:
+
+  527b47e8a2f61968e6af55ad4c5550e70e5b9555 (2026-10-01)
 
 The corresponding vscode-lean4 revision checked during the license audit was:
 
-  5a25e6abb2e973b4c89a053acc74c479c0bb2e9f
+  dead846a035f42dc13beb7619ac779538e6ddf6e
 
 Both files had SHA-256:
 
-  d5c529fdeb62071d6d16d51e3274a638165833a8c8cfdf02b379e051cbe22f27
+  fa5e317d4d481c8bf12d6438e489376931c18438dd0a68af3683a4cb9e92b5b0
 
 The full Apache-2.0 license is in LICENSES/Apache-2.0.txt.
 

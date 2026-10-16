@@ -90,6 +90,14 @@ def handle_request(message: dict[str, Any]) -> None:
     scenario = rule.get("scenario", "default")
     if method == "test/barrier":
         response(message, None)
+    elif method == "test/flood":
+        # Fill stdout before reading the next request. A client which writes
+        # synchronously can deadlock here when its stdin pipe also fills.
+        send({"jsonrpc": "2.0", "method": "window/logMessage",
+              "params": {"type": 4, "message": "x" * (256 * 1024)}})
+        response(message, None)
+    elif method == "test/echo":
+        response(message, message["params"])
     elif method == "initialize":
         response(
             message,

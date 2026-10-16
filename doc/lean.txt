@@ -21,6 +21,9 @@ includes a Lean-specific LSP client, infoview, completion, inlay hints,
 diagnostics, progress signs, semantic tokens, Unicode abbreviations,
 navigation, and code actions.
 
+Lean source windows reserve a sign column to avoid shifting text when signs
+appear. Infoview windows use manual folding, independently of source folding.
+
 ===============================================================================
 2. Installation                                        *lean-vim9-installation*
 

@@ -130,9 +130,9 @@ def CreateWindow(view: dict<any>)
     execute $'file [Lean\ Infoview\ {ViewKey()}]'
   endif
   view.winid = win_getid()
-  # Long diagnostics must wrap rather than run off the edge; 'wrap' is
-  # window-local, so it has to be reapplied on every (re)creation.
-  setlocal wrap linebreak breakindent
+  # Reusing the buffer creates a new window: reapply its display options so
+  # source folding, line numbers, and the sign column do not leak into it.
+  setlocal wrap linebreak breakindent nonumber norelativenumber signcolumn=no foldmethod=manual
   SetInfoOptions(view.bufnr)
   InstallMappings()
 enddef

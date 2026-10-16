@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -16,12 +19,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        lean: [v4.33.1, v4.34.1, stable]
     runs-on: ${{ matrix.os }}
+    env:
+      ELAN_TOOLCHAIN: leanprover/lean4:${{ matrix.lean }}
     # A test that errors mid-run can leave Vim hung in Ex mode; cap the job
     # rather than letting a wedged suite run for hours.
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # System/apt Vim on the runners predates uri_encode(); the plugin needs
       # Vim 9.2 (see plugin/lean.vim). Pin the patch level the suite is
       # documented against; the action caches the source build per OS.
@@ -29,11 +37,19 @@ jobs:
         uses: rhysd/action-setup-vim@v1
         with:
           version: v9.2.0850
+      - name: Install Lean
+        uses: Julian/setup-lean@c93774d9180849a5b6c4034c3c63d4544bdd943c
+        with:
+          default-toolchain: leanprover/lean4:${{ matrix.lean }}
       - name: Show tool versions
         run: |
           vim --version | head -n 4
           python3 --version
+          lean --version
+          lake --version
       - name: Lint
         run: make lint < /dev/null
       - name: Test
         run: make test < /dev/null
+      - name: Test live Lean server
+        run: make test-live < /dev/null

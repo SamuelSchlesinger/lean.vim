@@ -12,7 +12,7 @@ runtime plugin/lean.vim
 filetype plugin indent on
 
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
-set nowrap
+set nowrap foldmethod=expr foldexpr=1 foldlevel=0 number relativenumber
 lean#InfoviewOpen()
 var first = lean#InfoviewState()
 assert_equal(bufnr(root .. '/test/fixtures/Basic.lean'), first.source_bufnr)
@@ -25,6 +25,9 @@ assert_true(has_key(get(first, 'line_targets', {}), '1'),
 # the reused buffer gets a brand-new window each time.
 assert_true(getwinvar(bufwinid(first.bufnr), '&wrap'),
   'infoview window did not enable wrap')
+assert_equal('manual', getwinvar(bufwinid(first.bufnr), '&foldmethod'),
+  'source folding was inherited by the infoview')
+assert_equal('expr', &l:foldmethod, 'opening the infoview changed source folding')
 lean#InfoviewClose()
 lean#InfoviewOpen()
 first = lean#InfoviewState()
@@ -34,6 +37,12 @@ assert_true(getwinvar(bufwinid(first.bufnr), '&linebreak'),
   'reopened infoview window did not re-enable linebreak')
 assert_true(getwinvar(bufwinid(first.bufnr), '&breakindent'),
   'reopened infoview window did not re-enable breakindent')
+assert_equal('manual', getwinvar(bufwinid(first.bufnr), '&foldmethod'),
+  'reopened infoview inherited source folding')
+assert_false(getwinvar(bufwinid(first.bufnr), '&number'))
+assert_false(getwinvar(bufwinid(first.bufnr), '&relativenumber'))
+assert_equal('no', getwinvar(bufwinid(first.bufnr), '&signcolumn'))
+set foldmethod=manual foldlevel=0 nonumber norelativenumber
 
 # BufWinEnter does not fire when moving between two already-visible splits.
 # The tab-local infoview must still follow whichever Lean window is active.

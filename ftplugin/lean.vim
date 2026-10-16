@@ -9,6 +9,7 @@ endif
 b:did_ftplugin = 1
 
 setlocal expandtab shiftwidth=2 softtabstop=2
+setlocal signcolumn=yes
 setlocal commentstring=--\ %s
 setlocal comments=s0:/-,mb:\ ,ex:-/,:--
 setlocal iskeyword=a-z,A-Z,_,48-57,192-255,!,',?,#
@@ -36,7 +37,7 @@ if exists('g:loaded_switch')
   ]
 endif
 
-const undo_options = 'setlocal expandtab< shiftwidth< softtabstop< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'
+const undo_options = 'setlocal expandtab< shiftwidth< softtabstop< signcolumn< commentstring< comments< iskeyword< includeexpr< suffixesadd< matchpairs< | unlet! b:match_words b:match_ignorecase b:switch_definitions'
 
 # plugin/lean.vim sets this flag when required builtins are missing; loading
 # the runtime modules would only add compile errors to its one clear message.

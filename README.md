@@ -19,6 +19,10 @@ specific upstream work that made the original port possible.
 The initial port was reviewed against lean.nvim `main` at
 `e05c0f821412337259b98cc732ff0cf6ac7afe0c` (2026-07-30); development has been
 independent since.
+The most recent upstream review covered
+`ba5663698b76677c22f5602cdbb37ab4bade1072` (2026-10-15). The October update
+incorporates its Unicode data, infoview folding, and sign-column improvements;
+exact source revisions remain recorded in [NOTICE](NOTICE).
 
 New here? Start with the **[usage guide](USAGE.md)** for a task-oriented
 tour, or `:help lean-vim9` for the full reference.
@@ -31,7 +35,9 @@ tour, or `:help lean-vim9` for the full reference.
 - Lean 4 on `PATH` (normally installed with `elan`)
 - `lake` on `PATH` for Lake projects
 
-The test suite has been validated with Vim 9.2 (patches 1-850) and Lean 4.33.1.
+The live suite is checked against Lean 4.33.1, 4.34.1, and the current stable
+release (4.35.0 at this update), using Vim 9.2.0850. Lint, the offline suite,
+and live Lean 4.35.0 checks also pass with Vim 9.2.1202.
 
 ## Installation
 
@@ -153,6 +159,9 @@ highlighted. A statusline component is available with
 Unicode abbreviations expand on Space, Tab, Enter, or leaving Insert mode.
 The full abbreviation table is synchronized from lean.nvim's VS Code data.
 While an abbreviation is in progress, completion stays out of the way.
+Lean buffers reserve a sign column to keep diagnostics from shifting the text.
+The infoview uses manual folding, so source-window folding rules cannot hide
+goals or diagnostics.
 
 ## Relationship to lean.nvim
 
@@ -224,20 +233,30 @@ make license-check # verify pinned third-party files and required notices
 make hooks      # run lint and the offline suite before commits and pushes
 ```
 
-CI runs `make lint` and `make test` on Linux and macOS for every push and
-pull request (`.github/workflows/test.yml`). `make hooks` points
+CI runs `make lint`, `make test`, and `make test-live` on Linux and macOS for
+every push and pull request, with Lean 4.33.1, 4.34.1, and `stable`
+(`.github/workflows/test.yml`). The stable job picks up new Lean releases
+without changing a project's `lean-toolchain`. `make hooks` points
 `core.hooksPath` at `.githooks/` so the same lint, license, and headless
-test checks run locally before every commit and push (the suite takes a few
-seconds; skip with `--no-verify` when needed). `test-live` stays manual in
-both places since it needs a real Lean toolchain.
+test checks run locally before every commit and push (skip with `--no-verify`
+when needed). Local hooks keep the live tests
+optional, since they need an installed Lean toolchain.
+
+Use `ELAN_TOOLCHAIN=leanprover/lean4:v4.35.0 make test-live` to select an
+installed toolchain. Set `LEAN_VIM_TEST_VIM=/path/to/vim` to check another Vim
+build, or `LEAN_VIM_TEST_TIMEOUT` to override the per-script timeout in seconds.
+For an uninstalled Vim source build, also set `VIMRUNTIME` to its `runtime/`
+directory.
 
 The fake server supports named scenarios and explicit release of held replies;
 asynchronous tests can choose delivery order without server sleeps. The
-headless runner catches script errors and limits each Vim process to two
-minutes. See [test/support/README.md](test/support/README.md) for the harness.
+headless runner catches script errors and limits each test to two minutes,
+terminating the test's process group on Linux and macOS.
+See [test/support/README.md](test/support/README.md) for the harness.
 
-The headless tests cover split JSON-RPC frames, initialization and graceful
-shutdown, request cancellation, failed-start backoff, diagnostics, progress
+The headless tests cover split JSON-RPC frames, full pipes in both directions,
+file reloads, initialization and graceful shutdown, request cancellation,
+failed-start backoff, diagnostics, progress
 (including large-file sign capping), goals, term goals, semantic tokens,
 completion (async popup, UTF-16 textEdits, cancellation, resolve,
 abbreviation interplay), inlay hints, infoview jumping, document and

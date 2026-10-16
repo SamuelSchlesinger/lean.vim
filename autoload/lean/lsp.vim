@@ -485,6 +485,13 @@ def OnExit(server: dict<any>, _job: job, status: number)
   if !current && !server.stopping
     return
   endif
+  var was_running = server.running
+  # Discard queued nonblocking writes before Vim tries to flush them to the
+  # exited process. There can be unread output, but its requests are failed
+  # below along with the rest of this server's document lifetimes.
+  if has_key(server, 'channel') && ch_status(server.channel) !=# 'closed'
+    ch_close(server.channel)
+  endif
   server.running = false
   server.initialized = false
   if get(server, 'stop_timer', -1) >= 0
@@ -506,7 +513,9 @@ def OnExit(server: dict<any>, _job: job, status: number)
   if !server.stopping
     failed_since_ms[server.root] = NowMs()
     FailRequests(server, $'Lean language server exited with status {status}')
-    util.Notify($'language server exited with status {status}', status == 0 ? 'WarningMsg' : 'ErrorMsg')
+    if was_running
+      util.Notify($'language server exited with status {status}', status == 0 ? 'WarningMsg' : 'ErrorMsg')
+    endif
     silent doautocmd <nomodeline> User LeanDiagnosticsUpdate
     silent doautocmd <nomodeline> User LeanProgressUpdate
   else
@@ -807,6 +816,13 @@ def StartServer(root: string): dict<any>
       throw 'language-server command is empty'
     endif
     server.command = command
+    var program = command[0]
+    if program =~# '[/\\]' && program !~# '^\%([/\\]\|\a:[/\\]\)'
+      program = root .. '/' .. program
+    endif
+    if !executable(program)
+      throw $'language-server executable not found: {program}'
+    endif
     server.job = job_start(command, {
       cwd: root,
       in_io: 'pipe',
@@ -825,15 +841,27 @@ def StartServer(root: string): dict<any>
     endif
     RequestNow(server, 'initialize', InitParams(root),
       (result, error) => OnInitialized(server, result, error))
+    # Write the small initialize frame synchronously so an immediate exec
+    # failure is caught here, not by a later flush in Vim's event loop.
+    # Subsequent writes must be queued: Lean may be sending diagnostics while
+    # we send a large document, and both pipes can fill at once.
+    ch_setoptions(server.channel, {noblock: true})
   catch
+    var was_running = server.running
+    var message = $'cannot start Lean language server: {v:exception}'
     server.failed = true
     server.running = false
     failed_since_ms[root] = NowMs()
+    if has_key(server, 'channel') && ch_status(server.channel) !=# 'closed'
+      ch_close(server.channel)
+    endif
     if has_key(server, 'job') && job_status(server.job) ==# 'run'
       job_stop(server.job)
     endif
-    util.Notify($'cannot start Lean language server: {v:exception}'
-      .. '; not retrying automatically, use :LeanRestartServer', 'ErrorMsg')
+    FailRequests(server, message)
+    if was_running
+      util.Notify(message .. '; not retrying automatically, use :LeanRestartServer', 'ErrorMsg')
+    endif
   endtry
   return server
 enddef

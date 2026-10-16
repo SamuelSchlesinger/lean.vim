@@ -8,4 +8,4 @@ b:did_indent = 1
 setlocal buftype=nofile bufhidden=hide noswapfile nomodifiable
 # Diagnostics regularly exceed the infoview width; wrap at word boundaries
 # and keep the hanging indent so hypotheses stay readable.
-setlocal wrap linebreak breakindent nonumber norelativenumber signcolumn=no
+setlocal wrap linebreak breakindent nonumber norelativenumber signcolumn=no foldmethod=manual

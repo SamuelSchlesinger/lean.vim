@@ -13,17 +13,19 @@ filetype plugin indent on
 execute 'edit ' .. fnameescape(root .. '/test/fixtures/Basic.lean')
 
 
-assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+# Real toolchains can spend several seconds loading their initial environment,
+# especially on a cold CI runner. Keep the fake-server deadline short.
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false), 15000),
   'real Lean server did not initialize')
 cursor(2, 1)
 lean#InfoviewOpen()
-assert_true(harness.WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0),
+assert_true(harness.WaitFor(() => index(get(lean#InfoviewState(), 'goal', []), '⊢ Nat') >= 0, 15000),
   'real Lean server did not return the expected tactic goal: ' .. string(lean#InfoviewState()))
 
 # A live pin follows an inserted line and re-elaborates when the expected
 # type changes. This verifies the feature against Lean, not just a JSON stub.
 lean#InfoviewAddPin()
-assert_true(harness.WaitFor(() => index(get(get(get(lean#InfoviewState(), 'pins', []), 0, {}), 'lines', []), '⊢ Nat') >= 0))
+assert_true(harness.WaitFor(() => index(get(get(get(lean#InfoviewState(), 'pins', []), 0, {}), 'lines', []), '⊢ Nat') >= 0, 15000))
 var pinned_source = bufnr()
 append(0, '-- live pin movement')
 listener_flush(pinned_source)
@@ -103,7 +105,7 @@ assert_true(index(lean#InfoviewState().term_goal, 'h₁₂ : R v₁ v₂') >= 0,
 
 lean#InfoviewClose()
 execute 'edit! ' .. fnameescape(root .. '/test/fixtures/LakeProject/LeanVimFixture.lean')
-assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false)),
+assert_true(harness.WaitFor(() => get(lean#LspStatus(), 'initialized', false), 15000),
   'lake serve did not initialize for the Lake fixture')
 assert_equal('lake', lean#LspStatus().command[0])
 assert_equal(root .. '/test/fixtures/LakeProject', lean#LspStatus().root)

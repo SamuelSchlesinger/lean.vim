@@ -46,3 +46,8 @@ headless test. Call `lean#OnChanged(bufnr)` after a programmatic edit when the
 scenario needs the equivalent of a user-generated `TextChanged` event.
 Remaining timer tests exercise client debounce and throttle behavior; the fake
 server itself never sleeps to decide when a response should arrive.
+
+`test/flood` fills server output with a large log notification before reading
+another message. `test/echo` returns its parameters unchanged. The transport
+test combines them with a large Unicode request to exercise simultaneous
+backpressure on both pipes, then reloads a modified file while a reply is held.

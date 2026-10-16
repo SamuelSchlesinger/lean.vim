@@ -26,6 +26,14 @@ entry points remain forwarding functions for compatibility.
 
 ## Document and request lifetimes
 
+After the initial `initialize` frame, server input uses Vim's nonblocking
+write queue. Keeping that first, small write synchronous lets startup errors
+be caught before enabling deferred writes. Lean can emit diagnostics
+while the editor sends a large document or cancels requests; blocking writes
+can deadlock when both pipe buffers fill. The exit callback closes the channel
+and invalidates outstanding work. Missing executables are rejected before
+starting a job, with the same restart backoff as a failed process.
+
 A document identity is replaced when its buffer is renamed, its file is
 reopened through the server, or its server is replaced. Detaching invalidates
 it. A snapshot combines that identity with the buffer URI and `changedtick`.

@@ -120,7 +120,9 @@ assert_equal('test warning', lean#lsp#DiagnosticsAt(bufnr(), 1)[0].message)
 assert_equal(1, len(lean#lsp#DiagnosticsAt(bufnr(), 1)))
 assert_true(index(mapnew(sign_getplaced(bufnr(), {group: 'lean-diagnostics'})[0].signs,
   (_, sign) => sign.name), 'LeanGoalUnsolved') >= 0)
-assert_true(lean#lsp#ProgressAt(bufnr(), 2))
+# Progress is a separate notification and can arrive after diagnostics.
+assert_true(harness.WaitFor(() => lean#lsp#ProgressAt(bufnr(), 2)),
+  'file progress notification was not applied')
 assert_true(harness.WaitFor(() => index(mapnew(prop_list(1, {bufnr: bufnr()}),
   (_, property) => property.type), 'LeanSemantic_keyword') >= 0),
   'semantic token property was not placed')
